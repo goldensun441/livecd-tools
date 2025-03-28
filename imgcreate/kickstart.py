@@ -4,7 +4,6 @@
 # Copyright 2007, Red Hat  Inc.
 # Copyright 2016, Kevin Kofler
 # Copyright 2016, Neal Gompa
-# Copyright 2023, Fedora Project
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -27,7 +26,8 @@ import subprocess
 import time
 import logging
 
-import urlgrabber
+import selinux
+#import urlgrabber
 
 import pykickstart.commands as kscommands
 import pykickstart.constants as ksconstants
@@ -50,17 +50,14 @@ def read_kickstart(path):
     """
     version = ksversion.makeVersion()
     ks = ksparser.KickstartParser(version)
+
+
     try:
-        # If kickstart file exists on the local filesystem, open it directly
-        # so pykickstart knows how to handle relative %include. Otherwise,
-        # treat as URL and download to temporary file before parsing.
-        if os.path.exists(path):
-            ks.readKickstart(path)
-        else:
-            tmpks = '.kstmp.{}'.format(os.getpid())
-            ksfile = urlgrabber.urlgrab(path, filename=tmpks)
-            ks.readKickstart(tmpks)
-            os.unlink(tmpks)
+        ks.readKickstart(path)
+        #tmpks = '.kstmp.{}'.format(os.getpid())
+        #ksfile = urlgrabber.urlgrab(path, filename=tmpks)
+        #ks.readKickstart(tmpks)
+        #os.unlink (tmpks)
 # Fallback to e.args[0] is a workaround for bugs in urlgragger and pykickstart.
     except IOError as e:
         raise errors.KickstartError("Failed to read kickstart file "
@@ -185,16 +182,17 @@ class TimezoneConfig(KickstartConfig):
                 os.unlink(localtime)
             os.symlink("/usr/share/zoneinfo/%s" %(tz,), localtime)
 
-class AuthSelect(KickstartConfig):
-    """A class to apply a kickstart authselect configuration to a system."""
-    def apply(self, ksauthselect):
+class AuthConfig(KickstartConfig):
+    """A class to apply a kickstart authconfig configuration to a system."""
+    def apply(self, ksauthconfig):
 
-        auth = ksauthselect.authselect or "select sssd with-silent-lastlog --force"
+        auth = ksauthconfig.authconfig or "--useshadow --enablemd5"
+        args = ["authconfig", "--update", "--nostart"]
         try:
-            subprocess.call(['authselect'] + auth.split(), preexec_fn=self.chroot)
+            subprocess.call(args + auth.split(), preexec_fn=self.chroot)
         except OSError as e:
             if e.errno == errno.ENOENT:
-                logging.info('The authselect command is not available.')
+                logging.info('The authconfig command is not available.')
                 return
 
 class FirewallConfig(KickstartConfig):
@@ -470,8 +468,7 @@ class NetworkConfig(KickstartConfig):
 
 class SelinuxConfig(KickstartConfig):
     """A class to apply a kickstart selinux configuration to a system."""
-
-    def relabel(self, ksselinux, policy_name):
+    def relabel(self, ksselinux):
         # touch some files which get unhappy if they're not labeled correctly
         for fn in ("/etc/resolv.conf",):
             path = self.path(fn)
@@ -483,15 +480,10 @@ class SelinuxConfig(KickstartConfig):
         if ksselinux.selinux == ksconstants.SELINUX_DISABLED:
             return
 
-        # detect selinux policy file locations
-        policy_file = self.find_policy_file(policy_name)
-        file_context = '/etc/selinux/%s/contexts/files/file_contexts' % (policy_name)
-
         try:
-            rc = subprocess.call(['setfiles', '-F', '-p', '-e', '/proc',
+            rc = subprocess.call(['setfiles', '-p', '-e', '/proc',
                                   '-e', '/sys', '-e', '/dev',
-                                  '-c', policy_file,
-                                  file_context, '/'],
+                                  selinux.selinux_file_context_path(), '/'],
                                  preexec_fn=self.chroot)
         except OSError as e:
             if e.errno == errno.ENOENT:
@@ -517,11 +509,8 @@ class SelinuxConfig(KickstartConfig):
         else:
             return
 
-        # Detect policy name
-        lines = open(self.instroot+selinux_config).readlines()
-        policy_name = next(_findprefix('SELINUXTYPE=', lines), 'targeted')
-
         # Replace the SELINUX line in the config
+        lines = open(self.instroot+selinux_config).readlines()
         with open(self.instroot+selinux_config, "w") as f:
             for line in lines:
                 if line.startswith("SELINUX="):
@@ -529,19 +518,7 @@ class SelinuxConfig(KickstartConfig):
                 else:
                     f.write(line)
 
-        print('Setting SELinux contexts...')
-        self.relabel(ksselinux, policy_name)
-
-    def find_policy_file(self, policy_name):
-        """ Search for the SELinux binary policy file for policy_name """
-        guest_path = '/etc/selinux/%s/policy/' % (policy_name)
-        with os.scandir('%s%s' % (self.instroot, guest_path)) as sd:
-            for entry in sd:
-                if entry.is_file() and entry.name.startswith('policy.'):
-                    return guest_path + entry.name
-        raise errors.CreatorError(
-            "Unable to find SELinux binary policy file in \"%s\"" %
-            (guest_path))
+        self.relabel(ksselinux)
 
 def get_image_size(ks, default = None):
     __size = 0
@@ -566,7 +543,7 @@ def get_timeout(ks, default = None):
         return default
     return int(ks.handler.bootloader.timeout)
 
-def get_kernel_args(ks, default="ro rd.live.image"):
+def get_kernel_args(ks, default = "ro rd.live.image quiet"):
     if not hasattr(ks.handler.bootloader, "appendLine"):
         return default
     if ks.handler.bootloader.appendLine is None:
@@ -579,12 +556,6 @@ def get_default_kernel(ks, default = None):
     if not ks.handler.bootloader.default:
         return default
     return ks.handler.bootloader.default
-
-def get_modules(ks):
-    modules = []
-    for module in ks.handler.module.moduleList:
-        modules.append((module.name, module.stream, module.enable if hasattr(module, "enable") else True))
-    return modules
 
 def get_repos(ks, repo_urls = {}):
     repos = {}
@@ -680,12 +651,3 @@ def get_post_scripts(ks):
 def selinux_enabled(ks):
     return ks.handler.selinux.selinux in (ksconstants.SELINUX_ENFORCING,
                                           ksconstants.SELINUX_PERMISSIVE)
-
-def _findprefix(prefix, linesiter):
-    """ Searches for lines starting with prefix
-        Emits only matching lines without the prefix. """
-    def getmatch(line):
-        if line.startswith(prefix):
-            return line[len(prefix):].rstrip()
-
-    return filter(None, map(getmatch, linesiter))

@@ -4,7 +4,7 @@
 # Copyright 2007, Red Hat, Inc.
 # Copyright 2016, Kevin Kofler
 # Copyright 2016, Neal Gompa
-# Copyright 2017-2023, Fedora Project
+# Copyright 2017, Fedora Project
 #
 # Portions from Anaconda dnfpayload.py
 # DNF/rpm software payload management.
@@ -213,7 +213,7 @@ class ImageCreator(object):
         """
         pass
 
-    def _stage_final_image(self, ops=[]):
+    def _stage_final_image(self):
         """Stage the final system image in _outdir.
 
         This is the hook where subclasses should place the image in _outdir
@@ -350,7 +350,8 @@ class ImageCreator(object):
         filesystem.
 
         """
-        for b in reversed(self.__bindmounts):
+        self.__bindmounts.reverse()
+        for b in self.__bindmounts:
             b.unmount()
 
     def _chroot(self):
@@ -480,16 +481,13 @@ class ImageCreator(object):
                 os.symlink(src, self._instroot + dest)
         os.umask(origumask)
 
-    def __load_selinuxfs(self):
-        print('Setting SELinux contexts...')
-        arglist = ["mount", "--bind", "/dev/null",
-                   self._instroot + self.__selinux_mountpoint + "/load"]
-        subprocess.call(arglist, close_fds = True)
-
     def __create_selinuxfs(self, force=False):
         if not os.path.exists(self.__selinux_mountpoint):
             return
-        self.__load_selinuxfs()
+
+        arglist = ["mount", "--bind", "/dev/null",
+                   self._instroot + self.__selinux_mountpoint + "/load"]
+        subprocess.call(arglist, close_fds = True)
 
         if force or kickstart.selinux_enabled(self.ks):
             # label the fs like it is a root before the bind mounting
@@ -538,8 +536,7 @@ class ImageCreator(object):
 
         self._mount_instroot(base_on)
 
-        for d in ("/boot", "/dev", "/dev/pts", "/etc", "/proc", "/sys",
-                  "/var/cache/dnf", "/var/log"):
+        for d in ("/dev/pts", "/etc", "/boot", "/var/log", "/var/cache/dnf", "/sys", "/proc"):
             makedirs(self._instroot + d)
 
         cachesrc = cachedir or (self.__builddir + "/dnf-cache")
@@ -556,7 +553,7 @@ class ImageCreator(object):
         # bind mount system directories into _instroot
         for (f, dest) in [("/sys", None), ("/proc", None),
                           ("/dev/pts", None), ("/dev/shm", None),
-                          (self.__selinux_mountpoint, None),
+                          (self.__selinux_mountpoint, self.__selinux_mountpoint),
                           (cachesrc, "/var/cache/dnf")]:
             if os.path.exists(f):
                 self.__bindmounts.append(BindChrootMount(f, self._instroot, dest))
@@ -571,8 +568,7 @@ class ImageCreator(object):
 
         self.__create_minimal_dev()
 
-        if not os.path.lexists(self._instroot + "/etc/mtab"):
-            os.symlink("/proc/self/mounts", self._instroot + "/etc/mtab")
+        os.symlink("/proc/self/mounts", self._instroot + "/etc/mtab")
 
         self.__write_fstab()
 
@@ -651,7 +647,7 @@ class ImageCreator(object):
                                        (env, e))
 
         for group in kickstart.get_groups(self.ks):
-            if (group.name == 'core' and not kickstart.nocore(self.ks)) or group.name in excludedGroups:
+            if group.name == 'core' or group.name in excludedGroups:
                 continue
 
             try:
@@ -680,30 +676,17 @@ class ImageCreator(object):
                     raise CreatorError("Failed to find package '%s' : %s" %
                                        (pkg_name, e))
 
-    def install(self, repo_urls={}, repo=None, pkgverify_level=None):
+    def install(self, repo_urls = {}):
         """Install packages into the install root.
 
         This function installs the packages listed in the supplied kickstart
         into the install root. By default, the packages are installed from the
-        repository URLs specified in the kickstart. For advanced configuration,
-        you can opt to ignore the kickstart repositories entirely and use
-        repo configuration files like in /etc/yum.repos.d/. This is useful
-        for specifying GPG key options—which are not part of kickstart.
+        repository URLs specified in the kickstart.
 
         repo_urls -- a dict which maps a repository name to a repository URL;
                      if supplied, this causes any repository URLs specified in
                      the kickstart to be overridden.
 
-        repo      -- use RPM repositories defined in .repo config files in
-                     this file or directory. If this argument is provided,
-                     repos defined in the kickstart are ignored. This is useful
-                     for setting advanced dnf options like gpg keys.
-
-        pkgverify_level  -- sets RPM's %_pkgverify_level macro for enforcing
-                            GPG signature and/or digest verification. Set to
-                            "all" to enforce trusted GPG signatures for all
-                            installed packages. Omit to use RPM's default
-                            setting. See /usr/lib/rpm/macros.
         """
         dnf_conf = self._mktemp(prefix = "dnf.conf-")
 
@@ -711,23 +694,19 @@ class ImageCreator(object):
         dbo.setup(dnf_conf, self._instroot, cacheonly=self.cacheonly,
                    excludeWeakdeps=self.excludeWeakdeps)
 
-        if repo:
-            dbo.addRepositoryFromConfigFile(repo)
-        else:
-            for repo in kickstart.get_repos(self.ks, repo_urls):
-                (name, baseurl, mirrorlist, proxy,
-                inc, exc, cost, sslverify) = repo
+        for repo in kickstart.get_repos(self.ks, repo_urls):
+            (name, baseurl, mirrorlist, proxy, inc, exc, cost, sslverify) = repo
 
-                yr = dbo.addRepository(name, baseurl, mirrorlist)
-                if inc:
-                    yr.includepkgs = inc
-                if exc:
-                    yr.exclude = exc
-                if proxy:
-                    yr.proxy = proxy
-                if cost is not None:
-                    yr.cost = cost
-                yr.sslverify = sslverify
+            yr = dbo.addRepository(name, baseurl, mirrorlist)
+            if inc:
+                yr.includepkgs = inc
+            if exc:
+                yr.exclude = exc
+            if proxy:
+                yr.proxy = proxy
+            if cost is not None:
+                yr.cost = cost
+            yr.sslverify = sslverify
 
         if kickstart.exclude_docs(self.ks):
             rpm.addMacro("_excludedocs", "1")
@@ -738,12 +717,10 @@ class ImageCreator(object):
 
         dbo.fill_sack(load_system_repo = os.path.exists(self._instroot + "/var/lib/rpm/Packages"))
         dbo.read_comps()
-        dbo.setModules(kickstart.get_modules(self.ks))
 
         try:
             self.__apply_selections(dbo)
-            if pkgverify_level:
-                dbo.setPkgVerifyLevel(pkgverify_level)
+
             dbo.runInstall()
         except (dnf.exceptions.DownloadError, dnf.exceptions.RepoError) as e:
             raise CreatorError("Unable to download from repo : %s" % (e,))
@@ -811,7 +788,7 @@ class ImageCreator(object):
         kickstart.LanguageConfig(self._instroot).apply(ksh.lang)
         kickstart.KeyboardConfig(self._instroot).apply(ksh.keyboard)
         kickstart.TimezoneConfig(self._instroot).apply(ksh.timezone)
-        kickstart.AuthSelect(self._instroot).apply(ksh.authselect)
+        kickstart.AuthConfig(self._instroot).apply(ksh.authconfig)
         kickstart.FirewallConfig(self._instroot).apply(ksh.firewall)
         kickstart.RootPasswordConfig(self._instroot).apply(ksh.rootpw)
         kickstart.ServicesConfig(self._instroot).apply(ksh.services)
@@ -822,25 +799,16 @@ class ImageCreator(object):
         self._create_bootconfig()
 
         self._run_post_scripts()
-        try:
-            # Avoid relabelling host files.
-            self.__destroy_selinuxfs()
-            self._undo_bindmounts()
-            kickstart.SelinuxConfig(self._instroot).apply(ksh.selinux)
-        finally:
-            self._do_bindmounts()
+        kickstart.SelinuxConfig(self._instroot).apply(ksh.selinux)
 
-    def launch_shell(self, PS1='\\s-\\v\\$ '):
+    def launch_shell(self):
         """Launch a shell in the install root.
 
         This method is launches a bash shell chroot()ed in the install root;
         this can be useful for debugging.
 
         """
-        env = os.environ.copy()
-        env['PS1'] = PS1
-
-        subprocess.call("bash", preexec_fn=self._chroot, env=env)
+        subprocess.call("bash", preexec_fn=self._chroot)
 
     def package(self, destdir='.', ops=[]):
         """Prepares the created image for final delivery.
@@ -941,7 +909,7 @@ class LoopImageCreator(ImageCreator):
     def __get_image(self):
         if self.__imgdir is None:
             raise CreatorError("_image is not valid before calling mount()")
-        return self.__imgdir + "/rootfs.img"
+        return self.__imgdir + "/ext3fs.img"
     _image = property(__get_image)
     """The location of the image file.
 
@@ -997,12 +965,16 @@ class LoopImageCreator(ImageCreator):
         return self.__instloop.resparse(size)
 
     def _base_on(self, base_on):
-        shutil.copy2(base_on, self._image)
+        shutil.copyfile(base_on, self._image)
+        
     #
     # Actual implementation
     #
     def _mount_instroot(self, base_on = None):
         self.__imgdir = self._mkdtemp()
+
+        if not base_on is None:
+            self._base_on(base_on)
 
         self.__instloop = ExtDiskMount(SparseLoopbackDisk(self._image,
                                                           self.__image_size),
@@ -1010,9 +982,6 @@ class LoopImageCreator(ImageCreator):
                                        self._fstype,
                                        self.__blocksize,
                                        self.fslabel)
-
-        if not base_on is None:
-            self._base_on(base_on)
 
         try:
             self.__instloop.mount()
@@ -1024,6 +993,6 @@ class LoopImageCreator(ImageCreator):
         if not self.__instloop is None:
             self.__instloop.cleanup()
 
-    def _stage_final_image(self, ops=[]):
+    def _stage_final_image(self):
         self._resparse()
         shutil.move(self._image, self._outdir + "/" + self.name + ".img")

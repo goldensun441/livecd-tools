@@ -2,7 +2,7 @@
 # util.py : Various utility methods
 #
 # Copyright 2010, Red Hat, Inc.
-# Copyright 2017-2021, Fedora Project
+# Copyright 2017, Fedora Project
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -20,7 +20,6 @@
 import subprocess
 import logging
 import io
-from imgcreate.errors import *
 
 def call(*popenargs, **kwargs):
     """
@@ -32,18 +31,20 @@ def call(*popenargs, **kwargs):
                          stderr=subprocess.STDOUT, **kwargs)
     rc = p.wait()
     fp = io.open(p.stdout.fileno(), mode="r", encoding="utf-8", closefd=False)
-    stdout = fp.read().splitlines(keepends=False)
+    stdout = fp.read().split()
     fp.close()
 
     # Log output using logging module
     for buf in stdout:
-        logging.debug("%s", buf)
+        if not buf:
+            break
+        logging.debug("%s", buf.rstrip())
 
     return rc
 
 def rcall(args, stdin='', raise_err=True, cwd=None, env=None):
-    """Return stdout, stderr, & returncode from a subprocess call.
-    """
+    """Return stdout, stderr, & returncode from a subprocess call."""
+
     out, err, p, environ = '', '', None, None
     if env is not None:
         environ = os.environ.copy()

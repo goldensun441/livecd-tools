@@ -23,18 +23,15 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 
+from __future__ import print_function
 import glob
 import os
-import os.path
 import sys
 import logging
 import itertools
-from urllib.parse import urljoin
 
 import dnf
-import dnf.conf.read
 import dnf.rpm
-import rpm
 # FIXME: Why are these hidden inside dnf.cli? Any text-mode app should be able
 #        to make use of these.
 from dnf.cli.progress import MultiFileProgressMeter as DownloadProgress
@@ -45,16 +42,13 @@ from pykickstart.constants import GROUP_DEFAULT, GROUP_REQUIRED, GROUP_ALL
 from imgcreate.errors import *
 
 class DnfLiveCD(dnf.Base):
-    def __init__(self, releasever=None, useplugins=False, pkgverify_level=None):
+    def __init__(self, releasever=None, useplugins=False):
         """
         releasever = optional value to use in replacing $releasever in repos
         """
         dnf.Base.__init__(self)
         self.releasever = releasever
-        if releasever:
-            self.conf.substitutions['releasever'] = releasever
         self.useplugins = useplugins
-        self.pkgverify_level = pkgverify_level
 
     def doFileLogSetup(self, uid, logfile):
         # don't do the file log for the livecd as it can lead to open fds
@@ -85,8 +79,6 @@ class DnfLiveCD(dnf.Base):
         conf += "obsoletes=1\n"
         conf += "best=1\n"
         conf += "tsflags=nocontexts\n"
-        # For testing purposes only:
-        # conf += "tsflags=nocrypto\n"
 
         f = open(confpath, "w+")
         f.write(conf)
@@ -203,105 +195,7 @@ class DnfLiveCD(dnf.Base):
         self.repos.add(repo)
         return repo
 
-    def addRepositoryFromConfigFile(self, repo):
-        """
-        Import repository configuration from a DNF repo file instead of
-        from kickstart. If repo is a directory, all *.repo files in that
-        directory are imported.
-        """
-
-        def _to_abs_paths(basedir, paths):
-            # replace filenames (relative to basedir) with absolute URLs
-            for path in map(str, paths):
-                path = os.path.expanduser(path)
-                absurl = urljoin(
-                    'file://%s/' % os.path.abspath(basedir),
-                    path
-                )
-                yield absurl
-
-        logging.debug("searching for DNF repositories in \"%s\"", repo)
-        if os.path.isdir(repo):
-            repo_dir = repo
-            self.conf.reposdir = (repo)
-            self.conf.config_file_path = '/dev/null'
-        elif os.path.exists(repo):
-            repo_dir = os.path.dirname(repo)
-            self.conf.reposdir = ()
-            self.conf.config_file_path = repo
-        else:
-            raise CreatorError(\
-                "Unable to read repo configuration: \"%s\" does not exist" \
-                    % (repo))
-
-        self.read_all_repos()
-
-        # override configuration
-        found_enabled_repos = 0
-        for repo in self.repos.iter_enabled():
-            logging.debug("repo:\n%s", repo.dump())
-            logging.info('repo: %s (gpg=%s): %s', repo.id,
-                         repo.gpgcheck, repo.name)
-
-            repo.set_progress_bar(DownloadProgress())
-            repo.gpgkey = list(_to_abs_paths(repo_dir, repo.gpgkey))
-            found_enabled_repos += 1
-
-        # read_all_repos() may pass errors silently
-        # check that the command loaded at least one enabled repo
-        if found_enabled_repos <= 0:
-            with_dir = ''
-            if os.path.isdir(repo):
-                with_dir = ' .repo files with'
-            raise CreatorError(
-                "Unable to read repo configuration: \"%s\" does not " % repo +
-                "contain any%s enabled RPM repositories. " % with_dir +
-                "Check that this path contains dnf INI-style repo " +
-                "definitions like /etc/yum.repos.d. See `man 5 dnf.conf`.")
-
-    def setPkgVerifyLevel(self, pkgverify_level):
-        """
-        Configure RPM's %_pkgverify_level macro
-
-        Enforced package verification level (see /usr/lib/rpm/macros):
-          all           require valid digest(s) and signature(s)
-          signature     require valid signature(s)
-          digest        require valid digest(s)
-          none          traditional rpm behavior, nothing required
-        """
-        self.pkgverify_level = pkgverify_level
-
-    def setModules(self, module_list):
-        """
-        Enables/disables repo modules as requested by kickstart 'module' commands
-        """
-        if not module_list:
-            return
-        try:
-            import dnf.module.module_base
-        except ImportError:
-            raise CreatorError(
-                "Unable to setup modules: your DNF does not seem to support modules")
-        enabled = []
-        disabled = []
-        for (name, stream, enable) in module_list:
-            if enable:
-                if stream:
-                    enabled.append("%s:%s" %(name, stream))
-                else:
-                    enabled.append(name)
-            else:
-                disabled.append(name)
-        module_base = dnf.module.module_base.ModuleBase(self)
-        if enabled:
-            module_base.enable(enabled)
-        if disabled:
-            module_base.disable(disabled)
-
     def runInstall(self):
-        """
-        Install packages
-        """
         import dnf.exceptions
         os.environ["HOME"] = "/"
         try:
@@ -317,24 +211,7 @@ class DnfLiveCD(dnf.Base):
 
         dlpkgs = self.transaction.install_set
         self.download_packages(dlpkgs, DownloadProgress())
-
-        # check gpg signatures (repo must be gpgcheck=1)
-        #   We auto-import all dnf repository keys as we
-        #   encounter them.
-        if self.pkgverify_level not in ('digest', 'none'):
-            for pkg in dlpkgs:
-                res, err = self.package_signature_check(pkg)
-                if res == 0:
-                    continue
-                elif res == 1:
-                    self.package_import_key(pkg, lambda _x, _y, _z: True)
-                    res, err = self.package_signature_check(pkg)
-
-                if res != 0:
-                    raise CreatorError(err)
-
-        if self.pkgverify_level:
-            rpm.addMacro("_pkgverify_level", self.pkgverify_level)
+        # FIXME: sigcheck?
 
         ret = self.do_transaction(TransactionProgress())
         print("")

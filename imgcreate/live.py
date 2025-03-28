@@ -4,7 +4,7 @@
 # Copyright 2007-2012, Red Hat, Inc.
 # Copyright 2016-2018, Kevin Kofler
 # Copyright 2016, Neal Gompa
-# Copyright 2017-2023, Fedora Project
+# Copyright 2017-2018, Fedora Project
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -62,17 +62,11 @@ class LiveImageCreatorBase(LoopImageCreator):
                                   cacheonly=cacheonly,
                                   docleanup=docleanup)
 
-        self.dracut_conf_args = ""
-        """dracut conf arguments to use."""
-
         self.compress_args = "xz"
         """mksquashfs compressor arguments to use."""
 
         self.skip_compression = False
         """Controls whether to use squashfs to compress the image."""
-
-        self.skip_hfs = False
-        """Controls whether to create a hfs boot image."""
 
         self._timeout = kickstart.get_timeout(self.ks, 10)
         """The bootloader timeout from kickstart."""
@@ -82,16 +76,12 @@ class LiveImageCreatorBase(LoopImageCreator):
 
         self.__isodir = None
 
-        self.__modules = ["sym53c8xx", "aic7xxx", "=usb", "=firewire",
+        self.__modules = ["=ata", "sym53c8xx", "aic7xxx", "=usb", "=firewire",
                           "=mmc", "=pcmcia", "mptsas", "virtio_blk",
                           "virtio_pci", "virtio_scsi", "virtio_net", "virtio_mmio",
                           "virtio_balloon", "virtio-rng"]
 
         self._isofstype = "iso9660"
-        self._imgdir = "images/pxeboot"
-        self.kernels = None
-        self.kernel_options = None
-        self.checkisomd5 = False
         self._isDracut = True
         self.base_on = False
 
@@ -123,9 +113,6 @@ class LiveImageCreatorBase(LoopImageCreator):
 
         """
         r = kickstart.get_kernel_args(self.ks)
-        if (self.flat_squashfs and 'rd.live.overlay.overlayfs' not in r):
-            r += 'rd.live.overlay.overlayfs'
-        r += ' quiet'
         if (chrootentitycheck('rhgb', self._instroot) or
             chrootentitycheck('plymouth', self._instroot)):
             r += " rhgb"
@@ -147,33 +134,37 @@ class LiveImageCreatorBase(LoopImageCreator):
     #
     def _has_checkisomd5(self):
         """Check whether checkisomd5 is available in the install root."""
-        return chrootentitycheck('checkisomd5', self._instroot)
+        for c in '/usr/lib/anaconda-runtime/checkisomd5', 'checkisomd5':
+            if chrootentitycheck(c, self._instroot):
+                return True
+                break
+        else:
+            return False
 
     #
     # Actual implementation
     #
     def _base_on(self, base_on):
-        """helper function to extract the root filesystem from a live CD ISO
-        """
+        """helper function to extract ext3 file system from a live CD ISO"""
         isoloop = DiskMount(LoopbackDisk(base_on, 0), self._mkdtemp())
 
         try:
             isoloop.mount()
         except MountError as e:
-            raise CreatorError("Failed to loop mount '%s' : %s" %
+            raise CreatorError("Failed to loopback mount '%s' : %s" %
                                (base_on, e))
 
-        # Copy the initrd%d.img and xen%d.gz files over to self._imgdir
+        # Copy the initrd%d.img and xen%d.gz files over to /isolinux
         # This is because the originals in /boot are removed when the
         # original .iso was created.
-        src = os.path.join(isoloop.mountdir, self._imgdir)
-        dest = os.path.join(self.__ensure_isodir(), self._imgdir)
+        src = isoloop.mountdir + "/isolinux/"
+        dest = self.__ensure_isodir() + "/isolinux/"
         makedirs(dest)
         pattern = re.compile(r"(initrd\d+\.img|xen\d+\.gz)")
         files = [f for f in os.listdir(src) if pattern.search(f)
-                                               and os.path.isfile(src+'/'+f)]
+                                               and os.path.isfile(src+f)]
         for f in files:
-            shutil.copy2(src+'/'+f, dest+'/'+f)
+            shutil.copyfile(src+f, dest+f)
 
         # legacy LiveOS filesystem layout support, remove for F9 or F10
         if os.path.exists(isoloop.mountdir + "/squashfs.img"):
@@ -197,14 +188,13 @@ class LiveImageCreatorBase(LoopImageCreator):
             try:
                 squashloop.mount()
             except MountError as e:
-                raise CreatorError("Failed to loop mount squashfs.img "
+                raise CreatorError("Failed to loopback mount squashfs.img "
                                    "from '%s' : %s" % (base_on, e))
 
             # Test for flattened squashfs.
-            os_image = os.path.join(squashloop.mountdir, 'bin')
+            os_image = os.path.join(squashloop.mountdir, 'proc')
             if os.path.isdir(os_image):
                 os_image = squashimg
-                squashloop.unmount()
             else:
                 for f in ('rootfs.img', 'ext3fs.img'):
                     os_image = os.path.join(squashloop.mountdir, 'LiveOS', f)
@@ -216,22 +206,10 @@ class LiveImageCreatorBase(LoopImageCreator):
                 "LiveOS/rootfs.img, ext3fs.img, nor squashfs.img exist" %
                 base_on)
 
-            print('Copying base-on image from %s...' % base_on)
-            if os_image == squashimg:
-                try:
-                    self._LoopImageCreator__instloop.mount()
-                except MountError as e:
-                    raise CreatorError("Failed to loop mount the new rootfs "
-                                   "on '%s' : %s" % (self._instroot, e))
-
-                args = ['unsquashfs', '-f', '-d', self._instroot, squashimg]
-                subprocess.call(args)
-            else:
-                try:
-                    shutil.copy2(os_image, self._image)
-                except IOError as e:
-                    raise CreatorError("Failed to copy base-on image to %s "
-                        "for modification: %s" % (self._image, e))
+            try:
+                shutil.copyfile(os_image, self._image)
+            except IOError as e:
+                raise CreatorError("Failed to copy base live image to %s for modification: %s" %(self._image, e))
         finally:
             squashloop.cleanup()
             isoloop.cleanup()
@@ -245,7 +223,6 @@ class LiveImageCreatorBase(LoopImageCreator):
     def _unmount_instroot(self):
         self.__restore_file(self._instroot + "/etc/sysconfig/mkinitrd")
         self.__restore_file(self._instroot + "/etc/dracut.conf.d/99-liveos.conf")
-        self.__add_files()
         LoopImageCreator._unmount_instroot(self)
 
     def __ensure_isodir(self):
@@ -259,26 +236,14 @@ class LiveImageCreatorBase(LoopImageCreator):
             logging.error("Missing initial EFI bootloader, skipping efiboot.img creation.")
             return
 
-        if self.BIOSbooter == 'SYSLINUX':
-            d = isodir + "/images"
-        else:
-            d = self._ImageCreator__builddir
-
-        subprocess.call(["mkefiboot", "-l", "ESP", isodir + "/EFI/BOOT",
-                         d + "/efiboot.img"])
-
-    def _generate_grub2_bios_bootloader(self, isodir):
-        """Generate the eltorito.img for i386 bios booting."""
-        subprocess.call(["grub2-mkimage", "-O", "i386-pc-eltorito", "-d",
-            self._instroot + "/usr/lib/grub/i386-pc", "-o", isodir +
-            "/images/eltorito.img", "-p", "/boot/grub2", "iso9660", "biosdisk"])
+        # XXX-BCL: does this need --label?
+        subprocess.call(["mkefiboot", isodir + "/EFI/BOOT",
+                         isodir + "/isolinux/efiboot.img"])
 
     def _create_bootconfig(self):
         """Configure the image so that it's bootable."""
         self._configure_bootloader(self.__ensure_isodir())
         self._generate_efiboot(self.__ensure_isodir())
-        if self.BIOSbooter == 'GRUB':
-            self._generate_grub2_bios_bootloader(self.__ensure_isodir())
 
     def _get_post_scripts_env(self, in_chroot):
         env = LoopImageCreator._get_post_scripts_env(self, in_chroot)
@@ -289,24 +254,23 @@ class LiveImageCreatorBase(LoopImageCreator):
         return env
 
     def __extra_filesystems(self):
-        return "vfat msdos isofs ext4 xfs btrfs f2fs squashfs";
+        return "vfat msdos isofs ext4 xfs btrfs squashfs";
 
     def __extra_drivers(self):
-        retval = "sr_mod sd_mod cdrom "
-        if hasattr(self, '_LiveImageCreatorBase__modules'):
-            for module in self.__modules:
-                if module == "=usb":
-                    retval = retval + "ehci_hcd uhci_hcd ohci_hcd "
-                    retval = retval + "usb_storage usbhid uas "
-                elif module == "=firewire":
-                    retval = retval + "firewire-sbp2 firewire-ohci "
-                    retval = retval + "sbp2 ohci1394 "
-                elif module == "=mmc":
-                    retval = retval + "mmc_block sdhci sdhci-pci "
-                elif module == "=pcmcia":
-                    retval = retval + "pata_pcmcia "
-                else:
-                    retval = retval + module + " "
+        retval = "sr_mod sd_mod ide-cd cdrom "
+        for module in self.__modules:
+            if module == "=usb":
+                retval = retval + "ehci_hcd uhci_hcd ohci_hcd "
+                retval = retval + "usb_storage usbhid uas "
+            elif module == "=firewire":
+                retval = retval + "firewire-sbp2 firewire-ohci "
+                retval = retval + "sbp2 ohci1394 ieee1394 "
+            elif module == "=mmc":
+                retval = retval + "mmc_block sdhci sdhci-pci "
+            elif module == "=pcmcia":
+                retval = retval + "pata_pcmcia "
+            else:
+                retval = retval + module + " "
         return retval
 
     def __restore_file(self,path):
@@ -327,43 +291,16 @@ class LiveImageCreatorBase(LoopImageCreator):
         f.write('MODULES+="' + self.__extra_drivers() + '"\n')
         f.close()
 
-    def __dracut_conf_args(self, args=''):
-        if not args or args[0] == '+':
-            args = """
-mdadmconf=no
-lvmconf=no
-compress=""" + self.compress_args + """
-add_dracutmodules+=" livenet dmsquash-live dmsquash-live-autooverlay \
-dmsquash-live-ntfs overlayfs convertfs pollcdrom qemu qemu-net "
-hostonly=no
-early_microcode=no
-""" + args[1:]
-        args += '\nfilesystems+=" ' + self.__extra_filesystems() + ' "\n'
-        if self.__extra_drivers():
-            args += '\nadd_drivers+=" ' + self.__extra_drivers() + ' "\n'
-
-        return """# configuration from /etc/dracut.conf.d/99-liveos.conf
-""" + args + """
-"""
-
     def __write_dracut_conf(self, path):
         if not os.path.exists(os.path.dirname(path)):
             makedirs(os.path.dirname(path))
-        cfg = self.__dracut_conf_args(self.dracut_conf_args)
-
-        with open(path, 'a') as f:
-            f.write(cfg)
-
-    def __add_files(self):
-        for file in glob.glob(self._instroot +
-                          "/usr/share/licenses/*-release-common/*"):
-            shutil.copy2(file, self._LiveImageCreatorBase__isodir)
-
-        litd = self._instroot + "/usr/bin/livecd-iso-to-disk"
-        if os.path.exists(litd):
-            makedirs(self.__ensure_isodir() + "/LiveOS")
-            shutil.copy2(litd,
-                         self._LiveImageCreatorBase__isodir + "/LiveOS")
+        f = open(path, "a")
+        f.write('filesystems+="' + self.__extra_filesystems() + ' "\n')
+        f.write('add_drivers+="' + self.__extra_drivers() + ' "\n')
+        f.write('add_dracutmodules+=" dmsquash-live pollcdrom "\n')
+        f.write('hostonly="no"\n')
+        f.write('dracut_rescue_image="no"\n')
+        f.close()
 
     def __create_iso(self, isodir):
         iso = self._outdir + "/" + self.name + ".iso"
@@ -381,8 +318,8 @@ early_microcode=no
         if max(iterate_files_recursively(isodir)) >= 4 * 1024**3:
             args += ["-iso-level", "3"]
 
-        args += ["-output", iso, "-rational-rock", "-joliet",
-                 "-volid", self.fslabel, "-no-emul-boot"]
+        args += ["-output", iso,
+                 "-no-emul-boot"]
 
         args.extend(self._get_xorrisofs_options(isodir))
 
@@ -412,7 +349,6 @@ early_microcode=no
             makedirs(self.__ensure_isodir() + "/LiveOS")
 
             self._resparse()
-            self._LoopImageCreator__instloop.cleanup()
 
             os_image = os.path.join('LiveOS', 'rootfs.img')
             if self.skip_compression:
@@ -434,11 +370,6 @@ early_microcode=no
                            self.__isodir + "/LiveOS/squashfs.img",
                            self.compress_args, ops)
                 self._LoopImageCreator__instloop.cleanup()
-                if self.docleanup:
-                    if os_image == self._instroot:
-                        os.remove(self._image)
-                    else:
-                        os.remove(os.path.join(os_image, 'LiveOS', 'rootfs.img'))
 
             self.__create_iso(self.__isodir)
         finally:
@@ -453,37 +384,22 @@ class x86LiveImageCreator(LiveImageCreatorBase):
         self._efiarch = None
 
     def _get_xorrisofs_options(self, isodir):
-        if self.BIOSbooter == 'GRUB':
-            options = ["--grub2-mbr", isodir + "/boot/grub2/i386-pc/boot_hybrid.img",
-            "-partition_offset", "16", "-appended_part_as_gpt",
-            "-append_partition", "2", "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
-            isodir + "/../efiboot.img", "-iso_mbr_part_type",
-            "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7", "-c", "boot.cat",
-            "--boot-catalog-hide", "-b", "images/eltorito.img",
-            "-no-emul-boot", "-boot-load-size", "4", "-boot-info-table",
-            "--grub2-boot-info", "-eltorito-alt-boot",
-            "-e", '--interval:appended_partition_2:all::', "-no-emul-boot"]
-        else:
-            options = ["-eltorito-boot", "isolinux/isolinux.bin",
+        options = ["-eltorito-boot", "isolinux/isolinux.bin",
                    "-no-emul-boot", "-boot-info-table", "-boot-load-size", "4",
                    "-eltorito-catalog", "isolinux/boot.cat",
                    "-isohybrid-mbr", "/usr/share/syslinux/isohdpfx.bin"]
-            dirs = ["images", "isolinux"]
-            for img in (("efiboot.img", "basdat"), ("macboot.img", "hfsplus")):
-                for d in dirs:
-                    if os.path.exists(os.path.join(isodir, d, img[0])):
-                        options += ["-eltorito-alt-boot", "-e", d + "/" + img[0],
-                                    "-no-emul-boot", "-isohybrid-gpt-" + img[1]]
-                        dirs = [d]
-                        break
+        if os.path.exists(os.path.join(isodir, "isolinux/efiboot.img")):
+            options += ["-eltorito-alt-boot", "-e", "isolinux/efiboot.img",
+                        "-no-emul-boot", "-isohybrid-gpt-basdat"]
+        if os.path.exists(os.path.join(isodir, "isolinux/macboot.img")):
+            options += ["-eltorito-alt-boot", "-e", "isolinux/macboot.img",
+                        "-no-emul-boot", "-isohybrid-gpt-hfsplus"]
+        options += ["-rational-rock", "-joliet", "-volid", self.fslabel]
         return options
 
     def _get_required_packages(self):
-        if self.BIOSbooter == 'SYSLINUX':
-            pkgs = ["syslinux"]
-        else:
-            pkgs = []
-        return pkgs + LiveImageCreatorBase._get_required_packages(self)
+        return ["syslinux"] \
+               + LiveImageCreatorBase._get_required_packages(self)
 
     def _get_isolinux_stanzas(self, isodir):
         return ""
@@ -520,7 +436,7 @@ class x86LiveImageCreator(LiveImageCreatorBase):
                 raise CreatorError("syslinux not installed : "
                                    "%s not found" % path)
 
-            shutil.copy2(path, isodir + "/isolinux/")
+            shutil.copy(path, isodir + "/isolinux/")
 
     def __copy_syslinux_background(self, isodest):
         background_path = self._instroot + \
@@ -534,35 +450,34 @@ class x86LiveImageCreator(LiveImageCreatorBase):
             if not os.path.exists(background_path):
                 return False
 
-        shutil.copy2(background_path, isodest)
+        shutil.copyfile(background_path, isodest)
 
         return True
 
     def __copy_kernel_and_initramfs(self, isodir, version, index):
         bootdir = self._instroot + "/boot"
 
-        makedirs(os.path.join(isodir, self._imgdir))
-        shutil.copy2(os.path.join(bootdir, "vmlinuz-" + version),
-                        os.path.join(isodir, self._imgdir, "vmlinuz" + index))
+        shutil.copyfile(bootdir + "/vmlinuz-" + version,
+                        isodir + "/isolinux/vmlinuz" + index)
 
         isDracut = False
         if os.path.exists(self._instroot + "/usr/bin/dracut"):
             isDracut = True
 
         # FIXME: Implement a better check for how the initramfs is named...
-        if os.path.exists(os.path.join(bootdir, "initramfs-" + version + ".img")):
-            shutil.copy2(os.path.join(bootdir, "initramfs-" + version + ".img"),
-                            os.path.join(isodir, self._imgdir, "initrd" + index + ".img"))
-        elif os.path.exists(os.path.join(bootdir, "initrd-" + version + ".img")):
-            shutil.copy2(os.path.join(bootdir, "initrd-" + version + ".img"),
-                            os.path.join(isodir, self._imgdir, "initrd" + index + ".img"))
+        if os.path.exists(bootdir + "/initramfs-" + version + ".img"):
+            shutil.copyfile(bootdir + "/initramfs-" + version + ".img",
+                            isodir + "/isolinux/initrd" + index + ".img")
+        elif os.path.exists(bootdir + "/initrd-" + version + ".img"):
+            shutil.copyfile(bootdir + "/initrd-" + version + ".img",
+                            isodir + "/isolinux/initrd" + index + ".img")
         elif not self.base_on:
             logging.error("No initramfs or initrd found for %s" % (version,))
 
         is_xen = False
-        if os.path.exists(os.path.join(bootdir, "xen.gz-" + version[:-3])):
-            shutil.copy2(os.path.join(bootdir, "xen.gz-" + version[:-3]),
-                            os.path.join(isodir, "xen" + index + ".gz"))
+        if os.path.exists(bootdir + "/xen.gz-" + version[:-3]):
+            shutil.copyfile(bootdir + "/xen.gz-" + version[:-3],
+                            isodir + "/isolinux/xen" + index + ".gz")
             is_xen = True
 
         return (is_xen, isDracut)
@@ -622,8 +537,8 @@ menu separator
         if not is_xen:
             template = """label %(short)s
   menu label %(long)s
-  kernel /%(imgdir)s/vmlinuz%(index)s
-  append initrd=/%(imgdir)s/initrd%(index)s.img root=%(rootlabel)s rootfstype=%(isofstype)s %(liveargs)s %(extra)s
+  kernel vmlinuz%(index)s
+  append initrd=initrd%(index)s.img root=%(rootlabel)s rootfstype=%(isofstype)s %(liveargs)s %(extra)s
 """
         else:
             template = """label %(short)s
@@ -639,12 +554,9 @@ menu separator
         return template % args
 
     def __get_image_stanzas(self, isodir):
-        if not self.kernels:
-            self.kernels = self._get_kernel_versions()
-        if not self.kernel_options:
-            self.kernel_options = self._get_kernel_options()
-        if not self.checkisomd5:
-            self.checkisomd5 = self._has_checkisomd5()
+        kernels = self._get_kernel_versions()
+        kernel_options = self._get_kernel_options()
+        checkisomd5 = self._has_checkisomd5()
 
         # Stanzas for insertion into the config template
         linux = []
@@ -652,12 +564,12 @@ menu separator
         check = []
 
         index = "0"
-        for kernel, version in ((k,v) for k in self.kernels for v in self.kernels[k]):
+        for kernel, version in ((k,v) for k in kernels for v in kernels[k]):
             (is_xen, isDracut) = self.__copy_kernel_and_initramfs(isodir, version, index)
             if index == "0":
                 self._isDracut = isDracut
 
-            default = self.__is_default_kernel(kernel, self.kernels)
+            default = self.__is_default_kernel(kernel, kernels)
 
             if default:
                 long = self.product
@@ -668,9 +580,9 @@ menu separator
 
             # tell dracut not to ask for LUKS passwords or activate mdraid sets
             if isDracut:
-                kern_opts = self.kernel_options + " rd.luks=0 rd.md=0 rd.dm=0"
+                kern_opts = kernel_options + " rd.luks=0 rd.md=0 rd.dm=0"
             else:
-                kern_opts = self.kernel_options
+                kern_opts = kernel_options
 
             linux.append(self.__get_image_stanza(is_xen, isDracut,
                                            fslabel = self.fslabel,
@@ -680,8 +592,7 @@ menu separator
                                            short = "linux" + index,
                                            extra = "",
                                            help = "",
-                                           index = index,
-                                           imgdir = self._imgdir))
+                                           index = index))
 
             if default:
                 linux[-1] += "  menu default\n"
@@ -694,10 +605,9 @@ menu separator
                                            short = "basic" + index,
                                            extra = "nomodeset",
                                            help = "Try this option out if you're having trouble starting.",
-                                           index = index,
-                                           imgdir = self._imgdir))
+                                           index = index))
 
-            if self.checkisomd5:
+            if checkisomd5:
                 check.append(self.__get_image_stanza(is_xen, isDracut,
                                                fslabel = self.fslabel,
                                                isofstype = "auto",
@@ -706,8 +616,7 @@ menu separator
                                                short = "check" + index,
                                                extra = "rd.live.check",
                                                help = "",
-                                               index = index,
-                                               imgdir = self._imgdir))
+                                               index = index))
             else:
                 check.append(None)
 
@@ -720,7 +629,7 @@ menu separator
         if not memtest:
             return ""
 
-        shutil.copy2(memtest[0], isodir + "/isolinux/memtest")
+        shutil.copyfile(memtest[0], isodir + "/isolinux/memtest")
 
         return """label memtest
   menu label Run a ^memory test.
@@ -809,7 +718,7 @@ menu end
                  ("/boot/efi/EFI/*/gcd%s.efi" % (self.efiarch.lower(),), "/EFI/BOOT/grub%s.efi" % (self.efiarch.lower(),), True),
                  ("/boot/efi/EFI/*/shimia32.efi", "/EFI/BOOT/BOOTIA32.EFI", False),
                  ("/boot/efi/EFI/*/gcdia32.efi", "/EFI/BOOT/grubia32.efi", False),
-                 ("/usr/share/grub/unicode.pf2", "/EFI/BOOT/fonts/", True),
+                 ("/boot/efi/EFI/*/fonts/unicode.pf2", "/EFI/BOOT/fonts/", True),
                 ]
         makedirs(isodir+"/EFI/BOOT/fonts/")
         for src, dest, required in files:
@@ -819,11 +728,12 @@ menu end
                     logging.error("Missing EFI file (%s)" % (src,))
                     fail = True
             else:
-                shutil.copy2(src_glob[0], isodir+dest)
+                shutil.copy(src_glob[0], isodir+dest)
         return fail
 
     def __get_basic_efi_config(self, **args):
-        return """set default="0"
+        return """
+set default="1"
 
 function load_video {
   insmod efi_gop
@@ -852,51 +762,42 @@ search --no-floppy --set=root -l '%(isolabel)s'
             args["rootlabel"] = "live:LABEL=%(fslabel)s" % args
         else:
             args["rootlabel"] = "CDLABEL=%(fslabel)s" % args
-        return """%(tab)smenuentry '%(long)s' --class fedora --class gnu-linux --class gnu --class os {
-	%(tab)slinuxefi /%(imgdir)s/vmlinuz%(index)s root=%(rootlabel)s %(liveargs)s %(extra)s
-	%(tab)sinitrdefi /%(imgdir)s/initrd%(index)s.img
-%(tab)s}
+        return """menuentry '%(long)s' --class fedora --class gnu-linux --class gnu --class os {
+	linuxefi /isolinux/vmlinuz%(index)s root=%(rootlabel)s %(liveargs)s %(extra)s
+	initrdefi /isolinux/initrd%(index)s.img
+}
 """ %args
 
     def __get_efi_image_stanzas(self, isodir, name):
         # FIXME: this only supports one kernel right now...
 
-        if not 'linux' in self._imgdir:
-            if not self.kernels:
-                self.kernels = self._get_kernel_versions()
-            if not self.kernel_options:
-                self.kernel_options = self._get_kernel_options()
-            if not self.checkisomd5:
-                self.checkisomd5 = self._has_checkisomd5()
+        kernel_options = self._get_kernel_options()
+        checkisomd5 = self._has_checkisomd5()
 
-            cfg = ""
-            index = "0"
-            for kernel, version in ((k,v) for k in self.kernels for v in self.kernels[k]):
-                self.__copy_kernel_and_initramfs(isodir, version, index)
+        cfg = ""
 
         for index in range(0, 9):
             # we don't support xen kernels
             if os.path.exists("%s/EFI/BOOT/xen%d.gz" %(isodir, index)):
                 continue
             cfg += self.__get_efi_image_stanza(fslabel = self.fslabel,
-                                               liveargs = self.kernel_options,
+                                               liveargs = kernel_options,
                                                long = "Start " + self.product,
-                                               extra = "", imgdir = self._imgdir,
-                                               index = index, tab = "")
-            if self.checkisomd5:
+                                               extra = "", index = index)
+            if checkisomd5:
                 cfg += self.__get_efi_image_stanza(fslabel = self.fslabel,
-                                                   liveargs = self.kernel_options,
+                                                   liveargs = kernel_options,
                                                    long = "Test this media & start " + self.product,
                                                    extra = "rd.live.check",
-                                                   imgdir = self._imgdir,
-                                                   index = index, tab = "")
-            cfg += """submenu 'Troubleshooting -->' {
+                                                   index = index)
+            cfg += """
+submenu 'Troubleshooting -->' {
 """
             cfg += self.__get_efi_image_stanza(fslabel = self.fslabel,
-                                               liveargs = self.kernel_options,
+                                               liveargs = kernel_options,
                                                long = "Start " + self.product + " in basic graphics mode",
-                                               extra = "nomodeset", imgdir = self._imgdir,
-                                               index = index, tab = "	")
+                                               extra = "nomodeset", index = index)
+
             cfg+= """}
 """
             break
@@ -925,114 +826,16 @@ search --no-floppy --set=root -l '%(isolabel)s'
 
     def _generate_efiboot(self, isodir):
         LiveImageCreatorBase._generate_efiboot(self, isodir)
-        if self.BIOSbooter == 'SYSLINUX' and not self.skip_hfs:
-            # add macboot data for pre GRUB-only images.
-            subprocess.call(["mkefiboot", "-a", isodir + "/EFI/BOOT",
-                     isodir + "/images/macboot.img",
-                     "-l", self.product,
-                     "-n", "/usr/share/pixmaps/bootloader/fedora-media.vol",
-                     "-i", "/usr/share/pixmaps/bootloader/fedora.icns",
-                     "-p", self.product])
-
-    def __get_basic_grub2_bios_config(self, **args):
-        return """set default="0"
-
-function load_video {
-  insmod all_video
-}
-
-load_video
-set gfxpayload=keep
-insmod gzio
-insmod part_gpt
-insmod ext2
-insmod chain
-
-set timeout=%(timeout)d
-### END /etc/grub.d/00_header ###
-
-search --no-floppy --set=root -l '%(isolabel)s'
-
-### BEGIN /etc/grub.d/10_linux ###
-""" %args
-
-    def __get_grub2_bios_image_stanza(self, **args):
-        if self._isDracut:
-            args["rootlabel"] = "live:LABEL=%(fslabel)s" % args
-        else:
-            args["rootlabel"] = "CDLABEL=%(fslabel)s" % args
-        return """%(tab)smenuentry '%(long)s' --class fedora --class gnu-linux --class gnu --class os {
-	%(tab)slinux /%(imgdir)s/vmlinuz%(index)s root=%(rootlabel)s %(liveargs)s %(extra)s
-	%(tab)sinitrd /%(imgdir)s/initrd%(index)s.img
-%(tab)s}
-""" %args
-
-    def __get_grub2_bios_image_stanzas(self, isodir, name):
-        # FIXME: this only supports one kernel right now...
-
-        if not self.kernel_options:
-            self.kernel_options = self._get_kernel_options()
-        if not self.checkisomd5:
-            self.checkisomd5 = self._has_checkisomd5()
-
-        cfg = ""
-
-        for index in range(0, 9):
-            # we don't support xen kernels
-            if os.path.exists("%s/EFI/BOOT/xen%d.gz" %(isodir, index)):
-                continue
-            cfg += self.__get_grub2_bios_image_stanza(fslabel = self.fslabel,
-                                           liveargs = self.kernel_options,
-                                           long = "Start " + self.product,
-                                           extra = "", imgdir = self._imgdir,
-                                           index = index, tab = "")
-            if self.checkisomd5:
-                cfg += self.__get_grub2_bios_image_stanza(fslabel = self.fslabel,
-                           liveargs = self.kernel_options,
-                           long = "Test this media & start " + self.product,
-                           extra = "rd.live.check",
-                           imgdir = self._imgdir,
-                           index = index, tab = "")
-            cfg += """submenu 'Troubleshooting -->' {
-"""
-            cfg += self.__get_grub2_bios_image_stanza(fslabel = self.fslabel,
-                   liveargs = self.kernel_options,
-                   long = "Start " + self.product + " in basic graphics mode",
-                   extra = "nomodeset", imgdir = self._imgdir,
-                   index = index, tab = "	")
-
-            cfg+= """	menuentry 'Boot first drive' --class fedora --class gnu-linux --class gnu --class os {
-		chainloader (hd0)+1
-	}
-	menuentry 'Boot second drive' --class fedora --class gnu-linux --class gnu --class os {
-		chainloader (hd1)+1
-	}
-}
-"""
-            break
-
-        return cfg
-
-    def _configure_grub2_bios_bootloader(self, isodir):
-        """Set up the configuration for the GRUB2 bios bootloader."""
-        makedirs(isodir + "/boot/grub2")
-        shutil.copytree(self._instroot + "/usr/lib/grub/i386-pc",
-                     isodir + "/boot/grub2/i386-pc")
-
-        cfg = self.__get_basic_grub2_bios_config(isolabel = self.fslabel,
-                                          timeout = self._timeout)
-        cfg += self.__get_grub2_bios_image_stanzas(isodir, self.name)
-
-        cfgf = open(isodir + "/boot/grub2/grub.cfg", "w")
-        cfgf.write(cfg)
-        cfgf.close()
+        # add macboot data
+        subprocess.call(["mkefiboot", "-a", isodir + "/EFI/BOOT",
+                         isodir + "/isolinux/macboot.img", "-l", self.product,
+                         "-n", "/usr/share/pixmaps/bootloader/fedora-media.vol",
+                         "-i", "/usr/share/pixmaps/bootloader/fedora.icns",
+                         "-p", self.product])
 
     def _configure_bootloader(self, isodir):
+        self._configure_syslinux_bootloader(isodir)
         self._configure_efi_bootloader(isodir)
-        if self.BIOSbooter == 'SYSLINUX':
-            self._configure_syslinux_bootloader(isodir)
-        else:
-            self._configure_grub2_bios_bootloader(isodir)
 
 class ppcLiveImageCreator(LiveImageCreatorBase):
     def _get_xorrisofs_options(self, isodir):
@@ -1057,7 +860,7 @@ class ppcLiveImageCreator(LiveImageCreatorBase):
                 continue
 
             makedirs(destdir)
-            shutil.copy2(path, destdir)
+            shutil.copy(path, destdir)
             return
 
         raise CreatorError("Unable to find boot file " + file)
@@ -1077,15 +880,15 @@ class ppcLiveImageCreator(LiveImageCreatorBase):
 
         makedirs(destdir)
 
-        shutil.copy2(bootdir + "/vmlinuz-" + version,
+        shutil.copyfile(bootdir + "/vmlinuz-" + version,
                         destdir + "/vmlinuz")
 
         if os.path.exists(bootdir + "/initramfs-" + version + ".img"):
-            shutil.copy2(bootdir + "/initramfs-" + version + ".img",
+            shutil.copyfile(bootdir + "/initramfs-" + version + ".img",
                             destdir + "/initrd.img")
             isDracut = True
         else:
-            shutil.copy2(bootdir + "/initrd-" + version + ".img",
+            shutil.copyfile(bootdir + "/initrd-" + version + ".img",
                             destdir + "/initrd.img")
 
         return isDracut
@@ -1180,11 +983,11 @@ image=/ppc/ppc32/vmlinuz
         self.__copy_boot_file(isodir + "/ppc", "bootinfo.txt")
         self.__copy_boot_file(isodir + "/ppc/mac", "ofboot.b")
 
-        shutil.copy2(self._instroot + "/usr/lib/yaboot/yaboot",
+        shutil.copyfile(self._instroot + "/usr/lib/yaboot/yaboot",
                         isodir + "/ppc/mac/yaboot")
 
         makedirs(isodir + "/ppc/chrp")
-        shutil.copy2(self._instroot + "/usr/lib/yaboot/yaboot",
+        shutil.copyfile(self._instroot + "/usr/lib/yaboot/yaboot",
                         isodir + "/ppc/chrp/yaboot")
 
         subprocess.call(["addnote", isodir + "/ppc/chrp/yaboot"])
@@ -1206,10 +1009,10 @@ image=/ppc/ppc32/vmlinuz
 
         makedirs(isodir + "/etc")
         if kernel_bits["32"] and not kernel_bits["64"]:
-            shutil.copy2(isodir + "/ppc/ppc32/yaboot.conf",
+            shutil.copyfile(isodir + "/ppc/ppc32/yaboot.conf",
                             isodir + "/etc/yaboot.conf")
         elif kernel_bits["64"] and not kernel_bits["32"]:
-            shutil.copy2(isodir + "/ppc/ppc64/yaboot.conf",
+            shutil.copyfile(isodir + "/ppc/ppc64/yaboot.conf",
                             isodir + "/etc/yaboot.conf")
         else:
             self.__write_dualbits_yaboot_config(isodir,
@@ -1236,8 +1039,8 @@ class aarch64LiveImageCreator(LiveImageCreatorBase):
 
     def _get_xorrisofs_options(self, isodir):
         options = []
-        if os.path.exists(os.path.join(isodir, "images/efiboot.img")):
-            options += ["-eltorito-alt-boot", "-e", "images/efiboot.img",
+        if os.path.exists(os.path.join(isodir, "isolinux/efiboot.img")):
+            options += ["-eltorito-alt-boot", "-e", "isolinux/efiboot.img",
                         "-no-emul-boot", "-hide-rr-moved"]
         options += ["-rational-rock", "-joliet", "-volid", self.fslabel]
         return options
@@ -1249,7 +1052,7 @@ class aarch64LiveImageCreator(LiveImageCreatorBase):
     def __copy_kernel_and_initramfs(self, isodir, version, index):
         bootdir = self._instroot + "/boot"
         makedirs(isodir + "/LiveOS/")
-        shutil.copy2(bootdir + "/vmlinuz-" + version,
+        shutil.copyfile(bootdir + "/vmlinuz-" + version,
                         isodir + "/LiveOS/vmlinuz" + index)
 
         isDracut = False
@@ -1258,10 +1061,10 @@ class aarch64LiveImageCreator(LiveImageCreatorBase):
 
         # FIXME: Implement a better check for how the initramfs is named...
         if os.path.exists(bootdir + "/initramfs-" + version + ".img"):
-            shutil.copy2(bootdir + "/initramfs-" + version + ".img",
+            shutil.copyfile(bootdir + "/initramfs-" + version + ".img",
                             isodir + "/LiveOS/initrd" + index + ".img")
         elif os.path.exists(bootdir + "/initrd-" + version + ".img"):
-            shutil.copy2(bootdir + "/initrd-" + version + ".img",
+            shutil.copyfile(bootdir + "/initrd-" + version + ".img",
                             isodir + "/LiveOS/initrd" + index + ".img")
         elif not self.base_on:
             logging.error("No initramfs or initrd found for %s" % (version,))
@@ -1298,7 +1101,7 @@ class aarch64LiveImageCreator(LiveImageCreatorBase):
         fail = False
         files = [("/boot/efi/EFI/*/shim%s.efi" % (self.efiarch.lower(),), "/EFI/BOOT/BOOT%s.EFI" % (self.efiarch,), True),
                  ("/boot/efi/EFI/*/gcd%s.efi" % (self.efiarch.lower(),), "/EFI/BOOT/grub%s.efi" % (self.efiarch.lower(),), True),
-                 ("/usr/share/grub/unicode.pf2", "/EFI/BOOT/fonts/", True),
+                 ("/boot/efi/EFI/*/fonts/unicode.pf2", "/EFI/BOOT/fonts/", True),
                 ]
         makedirs(isodir+"/EFI/BOOT/fonts/")
         for src, dest, required in files:
@@ -1308,12 +1111,12 @@ class aarch64LiveImageCreator(LiveImageCreatorBase):
                     logging.error("Missing EFI file (%s)" % (src,))
                     fail = True
             else:
-                shutil.copy2(src_glob[0], isodir+dest)
+                shutil.copy(src_glob[0], isodir+dest)
         return fail
 
     def __get_basic_efi_config(self, **args):
         return """
-set default="0"
+set default="1"
 
 function load_video {
   insmod efi_gop
@@ -1382,7 +1185,7 @@ submenu 'Troubleshooting -->' {
 
     def _configure_efi_bootloader(self, isodir):
         """Set up the configuration for an EFI bootloader"""
-        makedirs(os.path.join(isodir, self._imgdir))
+        makedirs(isodir + "/isolinux")
         if self.__copy_efi_files(isodir):
             shutil.rmtree(isodir + "/EFI")
             logging.warning("Failed to copy EFI files, no EFI Support will be included.")

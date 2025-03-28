@@ -42,33 +42,17 @@ Defines the file system label. The default is based on the configuration name.
 
 =item --title=TITLE
 
-Title used in F<syslinux.cfg> file.
+Title used by F<syslinux.cfg> file.
 
 =item --product=PRODUCT
 
-Product name used in boot configuration stanzas and countdown.
+Product name used in F<syslinux.cfg> boot stanzas and countdown.
 
-=item --releasever=VER
+=item  -p, --plugins
 
-Set the value to substitute for $releasever in kickstart repo urls.
+Use DNF plugins during image creation.
 
-=item --syslinux
-
-Use SYSLINUX for BIOS booting (default: False).
-
-=item --nomacboot
-
-Do not create an HFS+ boot image and partition (default: False). Only
-operative when SYSLINUX BIOS booting is called (as HFS boot images are not
-needed or standard).
-
-=item --flat-squashfs
-
-Specify squashing the root filesystem directly. This eliminates the
-intermediate LiveOS directory holding another filesystem image file.  This is
-suitable only for OverlayFS overlays. (default=False).
-
-=item --compression-type="TYPE ARG1 ARG2 ..."
+=item --compression-type=COMPRESS_ARGS
 
 Specify a compressor recognized by mksquashfs.
 C<xz> is the default and works with 2.6.38 and later kernels.
@@ -80,46 +64,9 @@ Set to C<None> to force reading the compressor used in BASE_ON.
 If C<gzip> is used, the -comp option is not passed to mksquashfs to allow the use of older versions of mksquashfs.
 Multiple arguments should be specified in one string, i.e., C<--compression-type "type arg1 arg2 ...">.
 
-=item --dracut-conf-args="[+]ARG0 ARG1 ..."
+=item --releasever=VER
 
-The arguments that will be used by dracut to configure the initrd and be saved
-at F</etc/dracut.conf.d/99-liveos.conf>. This file persists only for the life of
-the install_root mount.  (A pending version of dracut will save this file in
-the initrd under F<*/lib/dracut/conffiles/> or another regular path.) Each argument
-consists of an attribute and a value (see L<dracut.conf(5)>).
-
-If the first argument string is prefixed with a '+' character, the additional
-arguments will be appended to the default set (superseding any there by default):
-
-  mdadmconf=no
-  lvmconf=no
-  compress=zstd
-  add_dracutmodules+=" livenet dmsquash-live dmsquash-live-autooverlay dmsquash-live-ntfs overlayfs convertfs pollcdrom qemu qemu-net "
-  hostonly=no
-  early_microcode=no
-
-=item  -p, --plugins
-
-Use DNF plugins during image creation.
-
-=item --pkgverify-level=LEVEL
-
-Sets GPG signature and package digest options for RPM.
-See "C<%_pkgverify_level>" in F</usr/lib/rpm/macros>.
-
-=over 1
-
-=item C<all> require valid digest(s) and signature(s)
-
-=item C<signature> require valid signature(s)
-
-=item C<digest> require valid digest(s)
-
-=item C<none> traditional rpm behavior, nothing required
-
-=back
-
-GPG signature verification requires the use of C<--repo>.
+Set the value to substitute for $releasever in kickstart repo urls.
 
 =back
 
@@ -133,15 +80,6 @@ These options define directories used on your system for creating the live image
 
 defines the temporary directory to use. The default directory is F</var/tmp>.
 
-=item -o, PATH --output=PATH
-
-The output directory path where the image .iso will be saved (default: F<'.'>).
-
-=item --repo=PATH
-
-Configure RPM repositories from the given file or directory of L<dnf.conf(5)>
-C<.repo> files. C<%repo> directives in the kickstart file will be ignored.
-
 =item --cache=CACHEDIR
 
 Defines the cache directory to use (default: private cache).
@@ -150,17 +88,9 @@ Defines the cache directory to use (default: private cache).
 
 Work offline from cache, use together with --cache (default: False).
 
-=item -l, --shell
-
-Launch a change root shell in the installation root filesystem.
-This includes bind mounts to the host directories F</dev>, F</dev/pts>,
-F</dev/shm>, F</proc>, F</sys>, F</sys/fs/selinux>, the creator iso stageing
-directory (mounted at F</run/iso>), and the host root filesystem (mounted at
-F</run/hostroot>).  Useful for F<ad hoc> custimization during a build session.
-
 =item --nocleanup
 
-Skip cleanup of temporary files (default: False).
+Skip cleanup of temporary files.
 
 =back
 
@@ -192,14 +122,14 @@ Save debug information to FILE.
 
 Barebones LiveCD
 
-  livecd-creator \
-    --config=/usr/share/livecd-tools/livecd-fedora-minimal.ks
+livecd-creator \
+--config=/usr/share/livecd-tools/livecd-fedora-minimal.ks
 
 Fedora Desktop Live CD
 
-  livecd-creator \
-    --config=/usr/share/livecd-tools/livecd-fedora-desktop.ks \
-    --fslabel=Fedora9-LiveCD-foo
+livecd-creator \
+--config=/usr/share/livecd-tools/livecd-fedora-desktop.ks \
+--fslabel=Fedora9-LiveCD-foo
 
 =head1 REPO EXTENSIONS
 
@@ -209,41 +139,10 @@ are replaced with the system arch, basearch and release version respectively.
 When no --releasever is passed it defaults to the current system's version.
 This allows the use of repo commands such as the following:
 
-  repo --name=fedora --mirrorlist=http://mirrors.fedoraproject.org/mirrorlist?repo=fedora-$releasever&arch=$basearch
+repo --name=fedora --mirrorlist=http://mirrors.fedoraproject.org/mirrorlist?repo=fedora-$releasever&arch=$basearch
 
 Note that in a chroot environment (like koji) the rpmdb is not available,
 so either don't use $releasever in that case, or pass --releasever=VER.
-
-=head1 SECURE IMAGE GENERATION
-
-Due to limitations in kickstart, the default invocation of livecd-creator
-cannot verify RPM package signatures. Package signatures are an essential
-security function which protects RPMs against tampering during storage or
-transfer.
-
-If possible, you should enable signature checks with the C<--repo> option:
-
-  livecd-creator \
-    --config=/usr/share/doc/livecd-tools/livecd-fedora-minimal.ks \
-    --repo=/etc/yum.repos.d
-
---repo configures RPM sources using L<dnf.conf(5)> configuration files
-instead of kickstart. If you are building a different distro than your
-host system, be sure to use configuration files for that distro.
-
-Your --repo file or directory can use any configuration options available to
-DNF. The following options must be set in order to verify signatures:
-
-  gpgcheck=1
-
-  gpgkey=path/to/key.asc
-         file:///url/to/another/key.asc
-
-In this mode, the C<%repo> directive(s) in the kickstart file, if any,
-are ignored.
-
-Additionally, use C<--pkgverify-level=all> to enforce valid, trusted
-signatures on all packages installed.
 
 =head1 CONTRIBUTORS
 
@@ -255,10 +154,10 @@ Report bugs to the mailing list L<http://www.redhat.com/mailman/listinfo/fedora-
 
 =head1 COPYRIGHT
 
-Copyright (C) Fedora Project 2008,2009,2020,2023 and various contributors. This is free software. You may redistribute copies of it under the terms of the GNU General Public License L<http://www.gnu.org/licenses/gpl.html>. There is NO WARRANTY, to the extent permitted by law.
+Copyright (C) Fedora Project 2008,2009,2020, and various contributors. This is free software. You may redistribute copies of it under the terms of the GNU General Public License L<http://www.gnu.org/licenses/gpl.html>. There is NO WARRANTY, to the extent permitted by law.
 
 =head1 SEE ALSO
 
-L<livecd-iso-to-disk(8)>, L<dnf.conf(5)>, L<dracut.conf(5)>, project website L<http://fedoraproject.org/wiki/FedoraLiveCD>
+C<livecd-iso-to-disk(8)>, project website L<http://fedoraproject.org/wiki/FedoraLiveCD>
 
 =cut

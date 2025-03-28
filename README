@@ -1,10 +1,13 @@
-Standalone fork of livecd-tools by goldensun441
 
-Created with the intent of blowing out recent updates back to when 
-the program  functioned properly (28.3), along with additional tweaks to 
-make it work with less external dependencies for my own application.
+Standalone fork of livecd-tools (version 28.3) with additional tweaks
 
-============================================================================
+Created with the intent of providing myself a stable working copy of the tool,
+since the developers are determined to break it with bad updates then abandon it.
+
+Minor modifications are made here and there to make it more suitable to my use.
+Such as removal of external references to urlgrabber, reading kickstart by local paths.
+
+===========================================================================
                        The Fedora Live CD Tools
                     David Zeuthen <davidz@redhat.com>
                     Jeremy Katz <katzj@redhat.com>
@@ -168,45 +171,14 @@ livecd-iso-to-disk script, like the following:
    livecd-iso-to-disk /path/to/live.iso /dev/sdb1
 
 Replace the '/dev/sdb1' argument above with the (unmounted) partition where you
-wish to load the live image.  This is not a destructive process; any data you
+wish to load the live image.  This is not a destructive process; any data you 
 currently have on your USB stick will be preserved.
 
 Multiple images may be loaded onto a single USB stick.
 
 See livecd-iso-to-disk --help for more options and instructions.
 
-6. SECURE IMAGE GENERATION
-
-Due to limitations in kickstart, the default invocation of livecd-creator
-cannot verify RPM package signatures. Package signatures are an essential
-security function which protects RPMs against tampering during storage or
-transfer.
-
-If possible, you should enable signature checks with the --repo option:
-
-  livecd-creator \
-    --config=/usr/share/doc/livecd-tools/livecd-fedora-minimal.ks \
-    --repo=/etc/yum.repos.d
-
---repo configures RPM sources using DNF ".repo" configuration files instead of
-kickstart. If you are building a different distro than your host system, be sure
-to use configuration files for that distro.
-
-Your --repo file or directory can use any configuration options available to
-DNF. The following options must be set in order to verify signatures:
-
-  gpgcheck=1
-
-  gpgkey=path/to/key.asc
-         file:///url/to/another/key.asc
-
-In this mode, the %repo directive(s) in the kickstart file, if any,
-are ignored.
-
-Additionally, use --pkgverify-level=all to enforce valid, trusted
-signatures on all packages installed.
-
-7. MOUNTING LIVE IMAGES
+6. MOUNTING LIVE IMAGES 
 
 A live CD .iso file or an installed live USB device may be mounted with the
 liveimage-mount script to peer into the live OS filesystem, or even edit it on
@@ -222,11 +194,10 @@ Live OS images may be edited using the editliveos script:
 
    editliveos [options] <LiveOS_source>
 
-This script may be used to merge a persistent overlay, run software updates
-including kernel and initial RAM filesystem updates, insert files, clone a
+This script may be used to merge a persistent overlay, insert files, clone a
 customized instance, adjust the root or home filesystem or overlay sizes and
 filesystem or overlay types, seclude private or user-specific files, rebuild
-the image into a new .iso image distribution file, and refresh the source's
+the image into a new, .iso image distribution file, and refresh the source's
 persistent filesystem overlay.
 
 See editliveos --help for more options and instructions.

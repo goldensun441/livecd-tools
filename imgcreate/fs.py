@@ -4,7 +4,7 @@
 #
 # Copyright 2007, Red Hat, Inc.
 # Copyright 2016, Neal Gompa
-# Copyright 2017-2021, Sugar Labs®
+# Copyright 2017-2019, Sugar Labs®
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -18,6 +18,9 @@
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+from __future__ import print_function
+from __future__ import absolute_import
+from __future__ import division
 
 import os
 import os.path
@@ -27,19 +30,12 @@ import stat
 import shutil
 import subprocess
 import random
-import resource
 import logging
 import tempfile
 import time
 
 from imgcreate.util import *
 from imgcreate.errors import *
-
-umount_fail_fmt = ("Unable to unmount filesystem at %s. The process using the "
-                   "imgcreate module, or one of the libraries used by that "
-                   "process, leaked a reference to the filesystem. Please "
-                   "report a bug at "
-                   "<https://github.com/livecd-tools/livecd-tools/issues>.")
 
 def chrootentitycheck(entity, chrootdir):
     """Check for entity availability in the chroot image.
@@ -107,16 +103,15 @@ def mksquashfs(in_dir, out_img, compress_args, ops=[]):
     args = ['mksquashfs', in_dir, out_img]
     # Allow gzip to work for older versions of mksquashfs
     if compress_args and compress_args != 'gzip':
-        if compress_args in ('xz1m', 'xz1M'):
+        if compress_args == 'xz1m':
             compress_args = "xz -b 1M -Xdict-size 1M -no-recovery"
         args += ['-comp'] + compress_args.split()
 
     if not sys.stdout.isatty():
         args.append('-no-progress')
 
-    if ops or '-progress' in args:
-        if 'show-squashing' in ops:
-            ops.remove('show-squashing')
+    if ops:
+        ops.remove('show-squashing')
         args += ops
         p = subprocess.Popen(args, stdout=None, stderr=subprocess.STDOUT)
         p.wait()
@@ -128,162 +123,36 @@ def mksquashfs(in_dir, out_img, compress_args, ops=[]):
         raise SquashfsError("'%s' exited with error (%d)" %
                             (' '.join(args), ret))
 
-def checkfsblksz(fstype, size, use=None, fssize=None):
-
-    if fstype in ('fat', 'vfat', 'msdos'):
-        if size not in (512, 1024, 2048, 4096, 8192, 16384, 32768):
-            raise CreatorError('\nERROR:  < %s > is not a valid sector size '
-            'for FAT.\n\n\t512, 1024, 2048, 4096, 8192, 16384, & 32768 bytes '
-            'may be specified.\n\n\tValues larger than 4096 bytes do not '
-            'conform to the FAT file system\n\tspecification and may not '
-            'work everywhere.  Please correct this.\n\n' % size)
-        if use == 'dev' and size > 512:
-            input('''\n
-            WARNING:
-            Block sizes greater that 512 bytes on vfat partitions
-            are not suitable for SYSLINUX bootable partitions.
-            Press Ctrl C to abort or Enter to continue...\n\n''')
-        elif use == 'home':
-            input('''\n
-            WARNING:
-            Using a FAT filesystem for a GNU/Linux home directory
-            will cause many core applications and services to fail
-            do to its limitations in managing access rights.
-            Press Ctrl C to abort, or Enter to continue...\n\n''')
-
-    elif fstype in ('ext4', 'ext3', 'ext2'):
-        if size not in (1024, -1024, 2048, -2048, 4096, -4096):
-            raise CreatorError('''\n
-            ERROR: < %s > is not a valid block size for the %s fs.
-            1024, 2048, & 4096 bytes may be specified.\n\n''' % (size, fstype))
-
-    elif fstype == 'f2fs' and size != 4096:
-        raise CreatorError('''\n
-        ERROR:  F2FS does not support block sizes other than
-                4096 bytes.\n\n''')
-
-    elif fstype == 'xfs':
-        if size not in (512, 4096, 65536):
-            raise CreatorError('''\n
-            ERROR: < %s > is not a valid block size for the xfs fs.
-            512, 4096, and 65536 bytes may be specified.\n\n''' % size)
-
-        ps = resource.getpagesize()
-        if use == 'dev' and size > ps:
-            imput('''\n
-            WARNING:
-            Partitions with block sizes greater than the
-            pagesize, %s bytes, may not be mountable by
-            default on this system.
-            Press Ctrl C to abort, or Enter to continue...\n\n''' % size)
-
-    elif fstype == 'btrfs':
-        if fssize < 16:
-            if size != 4:
-                raise CreatorError('''\n
-                ERROR:  Illegal node size < %s KiB> for btrfs mixed block
-                group filesystems.  Mixed block groups are suggested
-                for filesystems smaller than 16 GiB.  A node size of
-                4 Kibytes is required for mixed block groups.\n\n''' % size)
-        elif size not in (16, 32, 64):
-            raise CreatorError('''\n
-            ERROR:  < %s KiB> is not a valid node size for btrfs.
-            16 KiB is the default; 32 KiB is allowed; 64 KiB is the maximum.
-            ''' % size)
-
-
-def resizefs(fs, fstype, size=None, blksz=None, minimal=False, ops=''):
-
-    fsmnt = None
-    def mountfs(fs):
-        fsmp = tempfile.mkdtemp(dir='/run/media')
-        fsmnt = LoopbackMount(fs, fsmp)
-        fsmnt.mount()
-        return fsmnt
-
+def resize2fs(fs, size=None, minimal=False, ops=''):
     if minimal and size is not None:
         raise ResizeError("Can't specify both minimal and a size for resize!")
 
-    if ops != 'nocheck':
-        fsck(fs, fstype)
-
-    if fstype.startswith('ext'):
-        args = ['resize2fs', '-p', fs]
-        if minimal:
-            args.append('-M')
-        elif size:
-            args.append('%sK' %(size // 1024,))
-        if ops == 'nocheck':
-            args.append('-f')
-
-    elif fstype == 'f2fs':
-        args = ['resize.f2fs', fs]
-        if size:
-            args.extend(['-t', '%s' %(size // 512), '-d', '1'])
-
-    elif fstype == 'xfs':
-        # xfs_growfs requires that the filesystem be mounted.
-        fsmnt = mountfs(fs)
-        args = ['xfs_growfs', fsmnt.diskmount.mountdir]
-        if size:
-            args.extend(['-D', '%s' %(size // blksz)])
-
-    elif fstype == 'btrfs':
-        fsmnt = mountfs(fs)
-        if minimal:
-            args = ['btrfs', 'inspect-internal', 'min-dev-size',
-                    fsmnt.diskmount.mountdir]
-            min = rcall(args)[0].split()[0]
-            print('min-dev-size: ', min, ' bytes')
-            size = min
-
-        args = ['btrfs', 'filesystem', 'resize', str(size),
-                fsmnt.diskmount.mountdir]
+    args = ['resize2fs', '-p', fs]
+    if ops == 'nocheck':
+        args.append('-f')
+    else:
+        e2fsck(fs)
 
     logging.info('resizing %s' % (fs,))
+    if minimal:
+        args.append('-M')
+    elif size:
+        args.append('%sK' %(size // 1024,))
     ret = call(args)
     if ret != 0:
-        raise ResizeError("resizefs returned an error (%d)!" % (ret,))
-
-    if fsmnt:
-        fsmnt.cleanup()
+        raise ResizeError("resize2fs returned an error (%d)!" % (ret,))
 
     if ops != 'nocheck':
-        ret = fsck(fs, fstype)
+        ret = e2fsck(fs)
         if ret != 0:
             raise ResizeError("fsck after resize returned an error (%d)!" %
                               (ret,))
 
     return 0
 
-def fsck(fs, fstype):
+def e2fsck(fs):
     logging.info("Checking filesystem %s" % fs)
-
-    if not fstype:
-        fstype = rcall(['blkid', '-o', 'value', '-s', 'TYPE', fs])[0].strip()
-        if not fstype:
-            raise CreatorError("A filesystem type was not found for %s" % (fs,))
-
-    if fstype.startswith('ext'):
-        args = ['e2fsck', '-f', '-y', '-E', 'discard']
-    elif fstype == 'f2fs':
-        args = ['fsck.f2fs', '-f']
-    elif fstype in ('vfat', 'msdos'):
-        args = ['fsck.fat', '-avVw']
-    elif fstype == 'btrfs':
-        args = ['btrfs', 'check', '-p', '--repair', '--force']
-    elif fstype == 'xfs':
-        args = ['xfs_repair', '-fv']
-    elif fstype == 'hfsplus':
-        args = ['fsck.hfsplus', '-yfp']
-
-    if fs and args:
-        out, err, rc = rcall(args + [fs])
-        print(out, '\n', err, '\n', rc)
-
-        return rc
-    else:
-        return 1
+    return call(['e2fsck', '-f', '-y', '-E', 'discard', fs])
 
 def get_dm_table(device):
     """Return the table for a Device-mapper device."""
@@ -521,7 +390,7 @@ def mirror_fs(fs_dev, dm_node, imgsize, mirloops, mirname):
         print('/\b', end='')
         sys.stdout.flush()
         time.sleep(.5)
-        print('\u2014\b', end='')
+        print('-\b', end='')
         sys.stdout.flush()
         time.sleep(.5)
         print('\\\b', end='')
@@ -625,8 +494,8 @@ class SparseExtLoopbackMount(SparseLoopbackMount):
     def mount(self, ops='', dirmode=None):
         self.diskmount.mount(ops, dirmode)
 
-    def __fsck(self, fstype):
-        self.extdiskmount.__fsck(self.fstype)
+    def __fsck(self):
+        self.extdiskmount.__fsck()
 
     def __get_size_from_filesystem(self):
         return self.diskmount.__get_size_from_filesystem()
@@ -685,11 +554,10 @@ class RawDisk(Disk):
 
 class LoopbackDisk(Disk):
     """A Disk backed by a file via the loop module."""
-    def __init__(self, lofile, size, ops='', fstype=None, dirmode=None):
+    def __init__(self, lofile, size, ops='', dirmode=None):
         Disk.__init__(self, size)
         self.lofile = lofile
         self.ops = ops
-        self.fstype = fstype
         self.dirmode = dirmode
 
     def fixed(self):
@@ -725,9 +593,6 @@ class LoopbackDisk(Disk):
             raise MountError("Failed to allocate loop device for '%s'" %
                              self.lofile)
         self.device = device
-        call(['udevadm', 'settle'])
-        self.fstype = rcall([
-            'blkid', '-o', 'value', '-s', 'TYPE', device])[0].strip()
 
     def cleanup(self):
         if self.device is None:
@@ -828,10 +693,22 @@ class DiskMount(Mount):
         if self.mounted:
             logging.info("Unmounting directory %s" % self.mountdir)
             rc = call(['umount', self.mountdir])
-            if rc != 0:
-                call(['umount', '-l', self.mountdir])
-                raise MountError(umount_fail_fmt % self.mountdir)
-            self.mounted = False
+            if rc == 0:
+                self.mounted = False
+            else:
+                logging.warning("Unmounting directory %s failed, using lazy "
+                             "umount" % self.mountdir)
+                print("Unmounting directory %s failed, using lazy umount" %
+                      self.mountdir, file=sys.stdout)
+                rc = call(['umount', '-l', self.mountdir])
+                if rc != 0:
+                    raise MountError("Unable to unmount filesystem at %s" %
+                                     self.mountdir)
+                else:
+                    logging.info("lazy umount succeeded on %s" % self.mountdir)
+                    print("lazy umount succeeded on %s" % self.mountdir,
+                          file=sys.stdout)
+                    self.mounted = False
 
         if self.rmdir and not self.mounted:
             try:
@@ -940,6 +817,7 @@ class OverlayFSMount(Mount):
         self.cowmnt = ExtDiskMount(self.cowloop, self.cowmnt.mountdir, fstype,
                                    blksz, 'overlay', ops=ops, dirmode=0o755)
         self.cowmnt._ExtDiskMount__create()
+        self.cowmnt._ExtDiskMount__format_filesystem()
         self.cowmnt.mount()
         self.size = self.cowloop.size
         d = os.path.join(self.cowmnt.mountdir, 'overlayfs')
@@ -990,8 +868,15 @@ class OverlayFSMount(Mount):
 
         rc = call(['umount', self.mountdir])
         if rc != 0:
-            call(['umount', '-l', self.mountdir])
-            raise MountError(umount_fail_fmt % self.mountdir)
+            logging.info("Unable to unmount %s normally, using lazy unmount" %
+                         self.mountdir)
+            rc = call(['umount', '-l', self.mountdir])
+            if rc != 0:
+                raise MountError("Unable to unmount fs at %s" % self.mountdir)
+            else:
+                logging.info("lazy umount succeeded on %s" % self.mountdir)
+                print("lazy umount succeeded on '%s'" % (self.mountdir),
+                      sys.stdout)
         if self.cowmnt:
             self.cowmnt.unmount()
         self.imgmnt.unmount()
@@ -1035,8 +920,6 @@ class BindChrootMount():
             makedirs(os.path.dirname(os.path.realpath(self.dest)))
             if not os.path.exists(self.dest):
                 open(self.dest, 'a').close()
-            else:
-                return
         args = ['mount', '--bind', self.src, self.dest]
         rc = call(args)
         if rc != 0:
@@ -1066,10 +949,18 @@ class BindChrootMount():
             self.mounted = False
             return
 
-        rc = call(['umount', '-R', self.dest])
+        rc = call(['umount', self.dest])
         if rc != 0:
-            call(['umount', '-l', self.dest])
-            raise MountError(umount_fail_fmt % self.dest)
+            logging.info("Unable to unmount %s normally, using lazy unmount" %
+                         self.dest)
+            rc = call(['umount', '-l', self.dest])
+            if rc != 0:
+                raise MountError("Unable to unmount fs at %s" % self.dest)
+            else:
+                logging.info("lazy umount succeeded on %s" % self.dest)
+                print("lazy umount succeeded on %s" % self.dest,
+                      file=sys.stdout)
+
         self.mounted = False
 
     def cleanup(self):
@@ -1077,9 +968,7 @@ class BindChrootMount():
 
 
 class ExtDiskMount(DiskMount):
-    """A Extensible DiskMount object that can format and resize ext[234], xfs,
-    btrfs, and F2FS filesystems. (xfs and F2FS can only be enlarged.)
-    """
+    """A DiskMount object that can format/resize ext[234] filesystems."""
     def __init__(self, disk, mountdir, fstype, blocksize, fslabel,
                  rmmountdir=True, ops='', dirmode=None):
         DiskMount.__init__(self, disk, mountdir, fstype, rmmountdir, ops=ops,
@@ -1094,20 +983,14 @@ class ExtDiskMount(DiskMount):
         call(['wipefs', '-a', self.disk.device])
         args = ['mkfs.' + self.fstype]
         if self.fstype.startswith('ext'):
-            args += ['-F', '-L', self.fslabel[0:16], '-m', '1', '-b',
-                     str(self.blocksize)]
+            args = args + ['-F', '-L', self.fslabel, '-m', '1', '-b',
+                           str(self.blocksize)]
         elif self.fstype == 'xfs':
-            args += ['-L', self.fslabel[0:12], '-b', 'size=%s' %
-                     str(self.blocksize)]
+            args = args + ['-L', self.fslabel[0:10], '-b', 'size=%s' %
+                           str(self.blocksize)]
         elif self.fstype == 'btrfs':
-            args += ['-L', self.fslabel[0:255]]
-        elif self.fstype == 'f2fs':
-            args += ['-f', '-l', self.fslabel[0:512]]
-            ver = rcall(['mkfs.f2fs', '-V'])[0].split()[2].strip('()').replace('-', '')
-            if int(ver) >= 20200824:
-                # ver 1.14.0 (2020-08-24)
-                args += ['-O', 'sb_checksum']
-        args += [self.disk.device]
+            args = args + ['-L', self.fslabel]
+        args = args + [self.disk.device]
         logging.info("Formating args: %s" % args)
         rc = call(args)
 
@@ -1130,9 +1013,9 @@ class ExtDiskMount(DiskMount):
         if size > current_size:
             self.disk.expand(size=size)
 
-        resizefs(self.disk.lofile, self.fstype, size, blksz=self.blocksize,
-                 ops=ops)
-        if size < current_size:
+        if self.fstype.startswith('ext'):
+            resize2fs(self.disk.lofile, size, ops=ops)
+        elif size < current_size:
             self.disk.truncate(size=size)
         return size
 
@@ -1156,8 +1039,8 @@ class ExtDiskMount(DiskMount):
         self.__create(ops)
         DiskMount.mount(self, ops, dirmode)
 
-    def __fsck(self, fstype):
-        return fsck(self.disk.lofile, self.fstype)
+    def __fsck(self):
+        return e2fsck(self.disk.lofile)
         return rc
 
     def __get_size_from_filesystem(self):
@@ -1169,48 +1052,21 @@ class ExtDiskMount(DiskMount):
             raise KeyError("Failed to find field '%s' in output" % field)
 
         dev_null = os.open('/dev/null', os.O_WRONLY)
-        if self.fstype.startswith('ext'):
-            args = ['dumpe2fs', '-h']
-        elif self.fstype == 'f2fs':
-            args = ['dump.f2fs']
-        elif self.fstype == 'xfs':
-            args = ['xfs_info']
-        elif self.fstype == 'btrfs':
-            self.mount()
-            args = ['btrfs', 'filesystem', 'usage', '-b', self.mountdir]
-
-        if not self.fstype == 'btrfs':
-            args += [self.disk.lofile]
         try:
-            out = subprocess.Popen(args,
+            out = subprocess.Popen(['dumpe2fs', '-h', self.disk.lofile],
                                    stdout=subprocess.PIPE,
                                    stderr=dev_null).communicate()[0]
         finally:
             os.close(dev_null)
 
-        if self.fstype.startswith('ext'):
-            return int(parse_field(out, b'Block count:')) * self.blocksize
-        elif self.fstype == 'f2fs':
-            args = parse_field(out, b'Info: total FS sectors = ')
-            return int(args.split()[0]) * 512
-        elif self.fstype == 'xfs':
-            args = parse_field(out, b'data     =                       bsize=')
-            return int(args.split()[0]) * int(args.split(b'=')[1].split(b',')[0])
-        elif self.fstype == 'btrfs':
-            self.unmount()
-            return int(parse_field(out, b'    Device size:'))
+        return int(parse_field(out, b'Block count:')) * self.blocksize
 
     def __resize_to_minimal(self, ops=''):
-        resizefs(self.disk.lofile, self.fstype, minimal=True, ops=ops)
+        resize2fs(self.disk.lofile, minimal=True, ops=ops)
         return self.__get_size_from_filesystem()
 
     def resparse(self, size=None, ops=None):
-        if self.fstype and not self.disk.fstype:
-            self.disk.fstype = self.fstype
-        if not self.disk.fstype:
-            self.disk.fstype = rcall(
-            ['blkid', '-o', 'value', '-s', 'TYPE', self.disk.device])[0].strip()
-            self.fstype = self.disk.fstype
+        self.cleanup()
         minsize = self.__resize_to_minimal(ops=ops)
         self.disk.truncate(minsize)
         self.__resize_filesystem(size, ops=ops)
@@ -1299,7 +1155,7 @@ class DeviceMapperSnapshot(object):
             return
 
         self.imgloop.create(ops=ops)
-        self.cowloop.create()
+        self.cowloop.create(ops=ops)
 
         self.DeviceMapperTarget__name = self.__name = 'imgcreate-%d-%d' % (
             os.getpid(), random.randint(0, 2**16))
@@ -1308,7 +1164,8 @@ class DeviceMapperSnapshot(object):
 
         if '--readonly' in ops or '-r' in ops or 'ro' in ops:
             self.persistent = 'P'
-        if ('tmpfs' == self.cowloop.fstype or 'N' in ops):
+        if ('tmpfs' == findmnt('-no FSTYPE -T', self.cowloop.lofile)
+            or 'N' in ops):
             self.persistent = 'N'
         if 'P' in ops:
             self.persistent = 'P'
@@ -1443,11 +1300,11 @@ class CryptoLUKSDevice(object):
                 raise CryptoLUKSError(''.join((
                       'Could not resize the crypto_LUKS device using:\n  ',
                       args)))
-            resizefs(self.device, self.fstype, size=None, ops=ops)
+            resize2fs(self.device, size=None, ops=ops)
             self.cleanup()
         else:
             self.create(ops=ops)
-            resizefs(self.device, self.fstype, size, ops=ops)
+            resize2fs(self.device, size, ops=ops)
             args += ['--size', str(size // 512)]
             if call(args) != 0:
                 raise CryptoLUKSError(''.join((
@@ -1566,7 +1423,7 @@ class LiveImageMount(object):
     """
     def __init__(self, srcdir, mountdir, rootfsimg=None, overlay=None, ops='',
                  dirmode=None):
-        self.srcdir = srcdir.rstrip(os.sep)
+        self.srcdir = srcdir
         self.liveosdir = None
         self.mountdir = mountdir
         self.mounted = False
@@ -1590,20 +1447,12 @@ class LiveImageMount(object):
             return
         if not ops:
             ops = self.ops
-        for f in ('syslinux/syslinux.cfg', 'syslinux/extlinux.conf',
-                  '../EFI/BOOT/grub.cfg', '../EFI/boot/grub.cfg'):
-            cfgf = os.path.join(self.srcdir, f)
-            if os.path.exists(cfgf):
-                break
+        cfgf = os.path.join(self.srcdir, 'syslinux', 'syslinux.cfg')
+        if not os.path.exists(cfgf):
+            cfgf = os.path.join(self.srcdir, 'syslinux', 'extlinux.conf')
         cmd = ['sed', '-n', '-r']
-        if 'linux' in cfgf:
-            sedscript = r'''/^\s*label\s+linux/{n;n;n
-                            s/^\s*append\s+.*rd\.live\.dir=([^ ]*) .*/\1/p}'''
-        else:
-            self.liveosdir = os.path.basename(self.srcdir)
-            sedscript = r'''0,/^\s*linuxefi\s+\/{0}\// {{
-            s/^\s*linuxefi\s+\/{0}\/.*rd\.live\.dir=(\S+)( .*|$)/\1/p}}
-            '''.format(self.liveosdir)
+        sedscript = r'''/^\s*label\s+linux/{n;n;n
+                        s/^\s*append\s+.*rd\.live\.dir=([^ ]*) .*/\1/p}'''
         cmd.extend([sedscript, cfgf])
         self.liveosdir, err, rc = rcall(cmd)
         self.liveosdir = self.liveosdir.rstrip()
@@ -1652,7 +1501,7 @@ class LiveImageMount(object):
             ovldev = overlay[0]
             self.ovlmntdir = findmnt('-nfro TARGET', ovldev)
             if not self.ovlmntdir:
-                self.ovlmntdir = tempfile.mkdtemp('', 'ovl-', '/run')
+                self.ovlmntdir = tempfile.mkdtemp('', 'ovl-','/run')
             self.overlay = os.path.join(self.ovlmntdir, overlay[1])
             self.ovlmnt = DiskMount(RawDisk(None, ovldev), self.ovlmntdir,
                                     dirmode=dirmode)
@@ -1680,7 +1529,7 @@ class LiveImageMount(object):
                 self.cowloop.create('ro')
                 size = cow._size = os.stat(self.overlay)[stat.ST_SIZE]
                 call(['udevadm', 'settle', '-E', self.cowloop.device])
-                self.ovltype = self.cowloop.fstype
+                self.ovltype = lsblk('-ndo FSTYPE', self.cowloop.device)
                 self.cowloop.cleanup()
         else:
             if self.squashmnt is None:
@@ -1689,14 +1538,14 @@ class LiveImageMount(object):
                 self.ovltype = 'DM_linear'
                 self.overlay = None
             elif self.imgloop == self.squashloop:
-                self.overlay = tempfile.mkdtemp('', 'cow-', '/run')
+                self.overlay = tempfile.mkdtemp('', 'cow-','/run')
                 work = os.path.join(self.overlay, '..', 'ovlwork')
                 makedirs(work, 0o755)
                 cow = self.overlay
                 size = None
                 self.ovltype = 'dir'
             else:
-                self.overlay = tempfile.NamedTemporaryFile(prefix='ovl-',
+                self.overlay = tempfile.NamedTemporaryFile(dir=self.mountdir,
                                                            delete=False).name
                 self.overlay = self.cowloop = SparseLoopbackDisk(
                                                   self.overlay, 32 * 1024 ** 3)
@@ -1727,16 +1576,16 @@ class LiveImageMount(object):
         if self.ovlmnt:
             self.ovlmnt.unmount()
 
-    def make_overlay(self, size=512*1024**2, existing_size=0, ovltype='',
-                     ovl_fstype='', ovl_blksz=None, ops='', dirmode=None):
+    def make_overlay(self, size=512*1024**2, existing_size=0, ovl_fstype='',
+                     ovl_blksz=None, ops='', dirmode=None):
         """Register a new or modified LiveOS overlay."""
 
         if self.ovlmnt:
             self.ovlmnt.mount()
         if not self.overlay:
             device = findmnt('-no UUID,LABEL -T', self.srcdir)
-            device = device.split()
-            label = device[1].strip()
+            device = device.partition(' ')
+            label = device[2].strip()
             if ovl_fstype != 'dir' and any(n in ' \t\n\r\f\v' for n in label):
                 source = findmnt('-no SOURCE,FSTYPE -T', self.srcdir).split()
                 print("\nALERT:\tThe filesystem label on '", source[0],
@@ -1753,10 +1602,7 @@ class LiveImageMount(object):
                     args = ['e2label']
                 elif source[1] == 'btrfs':
                     args = ['btrfs', 'filesystem', 'label']
-                elif source[1] == 'xfs':
-                    args = ['xfs_admin', '-L', label, source[0]]
-                if source[1] != 'xfs':
-                    args += [source[0], label]
+                args += [source[0], label]
                 if call(args) != 0:
                     print('ERROR:\nRelabel of', source[0], 'has failed.\n')
 
@@ -1787,7 +1633,6 @@ class LiveImageMount(object):
             self.overlay = SparseLoopbackDisk(overfile, size)
             self.overlay.create(ops=ops, dirmode=dirmode)
             self.overlay.cleanup()
-            self.ovltype = 'DM_snapshot_cow'
         if ovl_fstype not in ('', 'temp', 'DM_snapshot_cow'):
             if self.imgloop == self.squashloop:
                 lower = self.squashmnt
@@ -1796,27 +1641,31 @@ class LiveImageMount(object):
             self.livemount = OverlayFSMount('overlayfs', lower, overfile, None,
                                             self.mountdir, size=size,
                                             ops=ops, dirmode=dirmode)
-        if ovl_fstype != 'dir':
-            self.resize_overlay(size, existing_size, ovl_fstype, ovl_blksz)
+            if ovl_fstype != 'dir':
+                self.resize_overlay(size, existing_size, ovl_fstype, ovl_blksz)
 
         self.ovltype = ovl_fstype
         if self.ovlmnt:
             ovldev = self.ovlmnt.disk.device + ':'
             overfile = overfile.replace(self.ovlmnt.mountdir + os.sep, ovldev)
         self.overlay = overfile
-        return (self.overlay, device[0])
+        return self.overlay
 
     def resize_overlay(self, overlay_size_mb, existing_size, ovl_fstype,
                        ovl_blksz):
         if ovl_fstype in ('', 'temp', 'DM_snapshot_cow'):
             overlay = self.overlay
-            self.reset_overlay()
-            if overlay_size_mb > existing_size:
-                overlay.expand(create=True, size=overlay_size_mb)
-            else:
-                overlay.truncate(size=overlay_size_mb)
         else:
             overlay = self.livemount.cowloop
+
+        if overlay_size_mb > existing_size:
+            overlay.expand(create=True, size=overlay_size_mb)
+        else:
+            overlay.truncate(size=overlay_size_mb)
+
+        if ovl_fstype in ('', 'temp', 'DM_snapshot_cow'):
+            self.reset_overlay()
+        else:
             self.livemount.create_ovlfs(ovl_fstype, ovl_blksz, 'overlayfs',
                                         dirmode=0o755)
 
@@ -1866,11 +1715,11 @@ class LiveImageMount(object):
     def unmount(self):
         if not self.mounted:
             return
-        if self.livemount:
-            self.livemount.unmount()
         if self.homemnt:
             self.homemnt.unmount()
             time.sleep(2)
+        if self.livemount:
+            self.livemount.unmount()
         if self.ovlmnt:
             self.ovlmnt.unmount()
         self.mounted = False
@@ -1887,16 +1736,14 @@ class LiveImageMount(object):
             self.livemount = None
         if self.imgloop:
             self.imgloop.cleanup()
-        if self.squashmnt:
-            self.squashmnt.cleanup()
         if isinstance(self.cowloop, LoopbackDisk):
             self.cowloop.cleanup()
             self.cowloop = None
         if self.ovlmnt:
             self.ovlmnt.cleanup()
         if self.overlay:
-            if isinstance(self.overlay, LoopbackDisk):
-                self.overlay.cleanup()
             self.overlay = None
+        if self.squashmnt:
+            self.squashmnt.cleanup()
         self.__created = False
 
