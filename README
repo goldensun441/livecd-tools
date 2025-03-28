@@ -1,4 +1,10 @@
+Standalone fork of livecd-tools by goldensun441
 
+Created with the intent of blowing out recent updates back to when 
+the program  functioned properly (28.3), along with additional tweaks to 
+make it work with less external dependencies for my own application.
+
+============================================================================
                        The Fedora Live CD Tools
                     David Zeuthen <davidz@redhat.com>
                     Jeremy Katz <katzj@redhat.com>
