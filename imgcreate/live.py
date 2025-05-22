@@ -718,7 +718,7 @@ menu end
                  ("/boot/efi/EFI/*/gcd%s.efi" % (self.efiarch.lower(),), "/EFI/BOOT/grub%s.efi" % (self.efiarch.lower(),), True),
                  ("/boot/efi/EFI/*/shimia32.efi", "/EFI/BOOT/BOOTIA32.EFI", False),
                  ("/boot/efi/EFI/*/gcdia32.efi", "/EFI/BOOT/grubia32.efi", False),
-                 ("/boot/efi/EFI/*/fonts/unicode.pf2", "/EFI/BOOT/fonts/", True),
+                 ("/usr/share/grub/unicode.pf2", "/EFI/BOOT/fonts/", True),
                 ]
         makedirs(isodir+"/EFI/BOOT/fonts/")
         for src, dest, required in files:
@@ -728,7 +728,7 @@ menu end
                     logging.error("Missing EFI file (%s)" % (src,))
                     fail = True
             else:
-                shutil.copy(src_glob[0], isodir+dest)
+                shutil.copy2(src_glob[0], isodir+dest)
         return fail
 
     def __get_basic_efi_config(self, **args):
@@ -1101,7 +1101,7 @@ class aarch64LiveImageCreator(LiveImageCreatorBase):
         fail = False
         files = [("/boot/efi/EFI/*/shim%s.efi" % (self.efiarch.lower(),), "/EFI/BOOT/BOOT%s.EFI" % (self.efiarch,), True),
                  ("/boot/efi/EFI/*/gcd%s.efi" % (self.efiarch.lower(),), "/EFI/BOOT/grub%s.efi" % (self.efiarch.lower(),), True),
-                 ("/boot/efi/EFI/*/fonts/unicode.pf2", "/EFI/BOOT/fonts/", True),
+                 ("/usr/share/grub/unicode.pf2", "/EFI/BOOT/fonts/", True),
                 ]
         makedirs(isodir+"/EFI/BOOT/fonts/")
         for src, dest, required in files:
@@ -1111,7 +1111,7 @@ class aarch64LiveImageCreator(LiveImageCreatorBase):
                     logging.error("Missing EFI file (%s)" % (src,))
                     fail = True
             else:
-                shutil.copy(src_glob[0], isodir+dest)
+                shutil.copy2(src_glob[0], isodir+dest)
         return fail
 
     def __get_basic_efi_config(self, **args):
